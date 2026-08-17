@@ -170,7 +170,64 @@ def extract_direct_link(entry, feed_url):
     return link
 
 
+def fetch_og_image(url, timeout=8):
+    """
+    Fetches the Open Graph image (og:image) from an article URL.
+    Used as fallback when the RSS feed does not provide an image.
+    Returns image URL string or None.
+    """
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; Hooshkav/1.0; +https://github.com/M-Taghizadeh/HooshKav)"},
+            allow_redirects=True,
+        )
+        if not resp.ok:
+            return None
+        content_type = resp.headers.get("content-type", "")
+        if "text/html" not in content_type:
+            return None
+        match = re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            resp.text, re.IGNORECASE
+        )
+        if not match:
+            match = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                resp.text, re.IGNORECASE
+            )
+        if match:
+            img_url = match.group(1).strip()
+            if img_url.startswith("http"):
+                return img_url
+    except Exception:
+        pass
+    return None
+
+
 def extract_image_url(entry):
+    """Extracts high quality article image from RSS entry media tags or HTML content."""
+    media_content = getattr(entry, "media_content", [])
+    for media in media_content:
+        if isinstance(media, dict) and media.get("url"):
+            return media["url"]
+
+    media_thumb = getattr(entry, "media_thumbnail", [])
+    for thumb in media_thumb:
+        if isinstance(thumb, dict) and thumb.get("url"):
+            return thumb["url"]
+
+    for link_item in getattr(entry, "links", []):
+        if isinstance(link_item, dict) and link_item.get("type", "").startswith("image/"):
+            return link_item.get("href")
+
+    raw_content = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+    img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', raw_content, re.IGNORECASE)
+    if img_match:
+        return img_match.group(1)
+
+    return None
     """Extracts high quality article image from RSS entry media tags or HTML content."""
     media_content = getattr(entry, "media_content", [])
     for media in media_content:
@@ -681,19 +738,25 @@ def _parse_digest_output(raw: str, articles: list) -> tuple:
 
 def select_best_article_for_single_post(articles):
     """
-    Uses the LLM to select the most newsworthy article.
-    Passes mention_count so the LLM can weight widely-covered stories higher.
-    Falls back to first article with an image, then first article overall.
+    Uses the LLM to select the most newsworthy article that HAS an image.
+    Falls back to first article with an image if LLM fails.
+    Returns None if no articles have an image.
     """
+    # Only consider articles that have an image
+    candidates_with_image = [a for a in articles if a.get("image_url")]
+
+    if not candidates_with_image:
+        print("[warn] No articles with images found — skipping single post")
+        return None
+
     candidates = []
-    for i, a in enumerate(articles):
+    for i, a in enumerate(candidates_with_image):
         candidates.append({
             "index": i,
             "title": a.get("title", ""),
             "source": a.get("source", ""),
             "summary": a.get("summary", "")[:150],
             "mention_count": a.get("mention_count", 1),
-            "has_image": bool(a.get("image_url")),
         })
 
     candidates_json = json.dumps(candidates, ensure_ascii=False, indent=2)
@@ -720,16 +783,13 @@ def select_best_article_for_single_post(articles):
         match = re.search(r"\d+", result)
         if match:
             idx = int(match.group())
-            if 0 <= idx < len(articles):
-                print(f"[info] LLM selected article index {idx}: {articles[idx].get('title', '')[:80]}")
-                return articles[idx]
+            if 0 <= idx < len(candidates_with_image):
+                print(f"[info] LLM selected article index {idx}: {candidates_with_image[idx].get('title', '')[:80]}")
+                return candidates_with_image[idx]
     except Exception as e:
         print(f"[warn] LLM article selection failed: {e}, using fallback")
 
-    for a in articles:
-        if a.get("image_url"):
-            return a
-    return articles[0] if articles else None
+    return candidates_with_image[0]
 
 
 def generate_single_rich_post(articles):
@@ -790,6 +850,10 @@ def generate_top3_rich_posts(articles: list, top3_links: list) -> list:
         article = link_to_article.get(link)
         if not article:
             print(f"[warn] Top3 link not found in articles: {link[:80]}")
+            continue
+
+        if not article.get("image_url"):
+            print(f"[info] Skipping rich post {rank}/3 (no image): {article.get('title', '')[:70]}")
             continue
 
         print(f"[info] Generating rich post {rank}/3: {article.get('title', '')[:70]}")

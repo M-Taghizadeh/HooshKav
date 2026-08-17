@@ -202,11 +202,11 @@ class TestSelectBestArticle(unittest.TestCase):
         self.assertEqual(result["title"], "AI Article 2")
 
     def test_fallback_to_first_when_no_image_and_llm_fails(self):
-        """When LLM fails and no article has an image, first article must be returned."""
+        """When no article has an image, must return None (no post without image)."""
         articles = self._make_articles(5, with_image=False)
         with patch.object(main, "generate_llm_text", side_effect=RuntimeError("LLM down")):
             result = main.select_best_article_for_single_post(articles)
-        self.assertEqual(result["title"], "AI Article 0")
+        self.assertIsNone(result)
 
     def test_out_of_range_index_triggers_fallback(self):
         """If LLM returns an index >= len(articles), fallback must kick in."""
