@@ -18,6 +18,7 @@ import time
 import math
 import datetime as dt
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import feedparser
@@ -328,6 +329,26 @@ def fetch_recent_articles(lookback_hours=None):
                 interleaved.append(item_list[i])
 
     print(f"[info] Collected {len(interleaved)} candidate articles from {len(articles_by_source)} unique sources")
+
+    # Enrich articles missing an image by fetching og:image from the article page
+    no_image = [a for a in interleaved if not a.get("image_url")]
+    if no_image:
+        print(f"[info] Fetching og:image for {len(no_image)} articles without RSS image...")
+
+        def _fetch(article):
+            img = fetch_og_image(article["link"])
+            return article, img
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch, a): a for a in no_image}
+            for future in as_completed(futures):
+                article, img = future.result()
+                if img:
+                    article["image_url"] = img
+
+        with_image = sum(1 for a in interleaved if a.get("image_url"))
+        print(f"[info] Articles with image after og:image fetch: {with_image}/{len(interleaved)}")
+
     return interleaved
 
 
@@ -1213,10 +1234,10 @@ def main():
 
         # 2. Send top 3 rich posts
         rich_posts = generate_top3_rich_posts(articles, top3_links)
-        for post_text, image_url in rich_posts:
-            if post_text:
-                for chat in targets:
-                    send_telegram_post(chat, post_text, image_url, post_type="single")
+        # for post_text, image_url in rich_posts:
+        #     if post_text:
+        #         for chat in targets:
+        #             send_telegram_post(chat, post_text, image_url, post_type="single")
 
         # Handle on-demand digest requests
         for chat_id, req_mode in on_demand_requests:
