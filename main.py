@@ -653,12 +653,152 @@ def generate_llm_text(system_prompt, user_prompt):
 # Step 3: Digest Generation & Single Rich Post Generation
 # ---------------------------------------------------------------------------
 
+DIGEST_EMOJIS = ["🧠", "📋", "🛠", "🔐", "💸", "🎬", "🚀", "⚡", "🌐", "📊"]
+
+
+def _extract_json_from_llm(raw: str):
+    """Parses a JSON object from LLM output, tolerating markdown fences."""
+    if not raw:
+        return None
+
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _inject_link_in_summary(summary: str, word: str, link: str) -> str:
+    """Ensures each digest item contains a clickable link to the source article."""
+    if not link or not link.startswith("http"):
+        return summary
+
+    if re.search(rf'href=["\']{re.escape(link)}["\']', summary):
+        return summary
+
+    word = (word or "").strip()
+    if word and word in summary:
+        return summary.replace(word, f'<a href="{link}">{word}</a>', 1)
+
+    return f'{summary} — <a href="{link}">مطالعه خبر</a>'
+
+
+def _build_digest_html(items: list, channel_footer: str = "") -> str:
+    """Builds the final Telegram digest HTML with guaranteed links on every item."""
+    lines = ["<b>مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی</b>", ""]
+
+    for i, item in enumerate(items):
+        emoji = DIGEST_EMOJIS[i % len(DIGEST_EMOJIS)]
+        summary = _inject_link_in_summary(
+            item.get("summary", "").strip(),
+            item.get("highlight_word", ""),
+            item.get("link", ""),
+        )
+        lines.append(f"{emoji} <b>خبر {i + 1}:</b> {summary}")
+        lines.append("")
+
+    if channel_footer:
+        lines.append(channel_footer.strip())
+
+    return "\n".join(lines).strip()
+
+
+def _fallback_digest_items(articles: list, count: int = TARGET_DIGEST_COUNT) -> list:
+    """Fallback digest items when LLM JSON parsing fails."""
+    items = []
+    for article in articles[:count]:
+        title = article.get("title", "").strip()
+        source = article.get("source", "").strip()
+        summary = title
+        if source:
+            summary = f"{title} ({source})"
+        items.append({
+            "link": article.get("link", ""),
+            "summary": summary,
+            "highlight_word": source or title.split()[0] if title else "منبع",
+        })
+    return items
+
+
+def _parse_digest_items(raw: str, articles: list) -> list:
+    """
+    Parses LLM JSON output into validated digest items.
+    Falls back to top articles by mention_count when parsing fails.
+    """
+    link_to_article = {a["link"]: a for a in articles if a.get("link")}
+    data = _extract_json_from_llm(raw)
+
+    if not isinstance(data, dict):
+        print("[warn] Digest JSON parse failed — using fallback items")
+        return _fallback_digest_items(articles)
+
+    raw_items = data.get("items", [])
+    if not isinstance(raw_items, list):
+        print("[warn] Digest JSON missing items array — using fallback items")
+        return _fallback_digest_items(articles)
+
+    valid_items = []
+    seen_links = set()
+
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+
+        link = (item.get("link") or "").strip()
+        summary = (item.get("summary") or "").strip()
+        highlight_word = (item.get("highlight_word") or "").strip()
+
+        if not link or link not in link_to_article or link in seen_links:
+            continue
+        if not summary:
+            article = link_to_article[link]
+            summary = article.get("title", "").strip() or "خبر مهم هوش مصنوعی"
+
+        valid_items.append({
+            "link": link,
+            "summary": summary,
+            "highlight_word": highlight_word,
+        })
+        seen_links.add(link)
+
+        if len(valid_items) >= TARGET_DIGEST_COUNT:
+            break
+
+    if len(valid_items) < TARGET_DIGEST_COUNT:
+        print(f"[warn] Only {len(valid_items)} valid digest items parsed — filling from top articles")
+        for article in articles:
+            link = article.get("link", "")
+            if not link or link in seen_links:
+                continue
+            valid_items.append({
+                "link": link,
+                "summary": article.get("title", "").strip() or "خبر مهم هوش مصنوعی",
+                "highlight_word": article.get("source", "").strip() or "منبع",
+            })
+            seen_links.add(link)
+            if len(valid_items) >= TARGET_DIGEST_COUNT:
+                break
+
+    return valid_items[:TARGET_DIGEST_COUNT]
+
+
 def generate_daily_digest(articles):
     """
-    Generates the 10-item daily digest post AND returns the top 3 article links
-    for rich post generation — all in a single LLM call.
+    Generates the daily digest post with guaranteed source links on every item.
 
-    Returns: (digest_text: str, top3_links: list[str])
+    Returns: digest_text (str)
     """
     compact = []
     for a in articles:
@@ -676,7 +816,7 @@ def generate_daily_digest(articles):
 
     system_prompt = (
         "تو یک روزنامه‌نگار و فیلترکننده ارشد اخبار فناوری و هوش مصنوعی هستی. "
-        "وظیفه تو تحلیل اخبار ورودی، انتخاب ۱۰ خبر مهم و مشخص کردن ۳ خبر برتر برای پست کامل است."
+        f"وظیفه تو انتخاب {TARGET_DIGEST_COUNT} خبر مهم و نوشتن خلاصه فارسی برای هر کدام است."
     )
 
     user_prompt = f"""
@@ -685,76 +825,35 @@ def generate_daily_digest(articles):
 نکته مهم: هر مقاله یک فیلد «mention_count» دارد که نشان می‌دهد چند منبع مختلف همین خبر را پوشش داده‌اند.
 خبری که mention_count بالاتری دارد اهمیت بیشتری دارد و باید در اولویت انتخاب قرار گیرد.
 
-وظیفه تو دو بخش دارد:
+بالضبط {TARGET_DIGEST_COUNT} خبر بسیار مهم و متنوع هوش مصنوعی را انتخاب کن.
 
-**بخش اول — پست دیجست:**
-بالضبط {TARGET_DIGEST_COUNT} خبر بسیار مهم و متنوع هوش مصنوعی را انتخاب کن و با ساختار زیر بنویس:
+خروجی فقط یک JSON معتبر باشد (بدون ```json و بدون توضیح اضافه) با این ساختار:
 
-<b>مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی</b>
-
-🧠 <b>خبر ۱:</b> خلاصه کوتاه، روان و کاربردی خبر به فارسی که دقیقاً ۱ کلمه کلیدی آن به صورت <a href="لینک خبر">کلمه</a> هایپرلینک شده باشد.
-
-(بین هر خبر دقیقا یک خط خالی بگذار و برای هر خبر یک ایموجی مرتبط و جدید مثل 🧠, 📋, 🛠, 🔐, 💸, 🎬, 🚀, ⚡, 🌐, 📊 بگذار)
-{channel_footer}
-
-**بخش دوم — ۳ خبر برتر:**
-پس از پست دیجست، دقیقاً یک بلاک JSON به شکل زیر اضافه کن که لینک ۳ مهم‌ترین خبر از لیست ۱۰ خبر بالا را مشخص می‌کند (همان لینک‌های دقیق از فیلد link مقالات):
-
-TOP3_JSON_START
-["لینک خبر اول", "لینک خبر دوم", "لینک خبر سوم"]
-TOP3_JSON_END
+{{
+  "items": [
+    {{
+      "link": "لینک دقیق مقاله از فیلد link ورودی",
+      "summary": "خلاصه کوتاه، روان و کاربردی خبر به فارسی (بدون HTML)",
+      "highlight_word": "یک کلمه کلیدی از summary که باید لینک‌دار شود"
+    }}
+  ]
+}}
 
 قوانین الزامی:
-- خروجی را مستقیماً با عبارت <b>مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی</b> شروع کن.
+- دقیقاً {TARGET_DIGEST_COUNT} آیتم در items باشد.
+- فیلد link باید عیناً از فیلد link مقالات ورودی کپی شود.
+- highlight_word باید دقیقاً یکی از کلمات داخل summary باشد.
 - اخبار با mention_count بالاتر را در اولویت قرار بده.
-- لینک‌ها را حتماً به صورت HTML یعنی <a href="لینک مقاله">کلمه</a> بنویس. از فرمت [کلمه](لینک) استفاده نکن.
 - اخبار را از منابع متنوع انتخاب کن.
-- بلاک TOP3_JSON را دقیقاً بعد از پست دیجست بنویس، بدون توضیح اضافه.
-- خروجی فقط متن نهایی باشد بدون ```html یا ```json.
+- summary نباید HTML یا لینک داشته باشد.
 
 مقالات ورودی:
 {articles_json}
 """
 
     raw = generate_llm_text(system_prompt, user_prompt)
-
-    # Parse digest text and top3 links
-    digest_text, top3_links = _parse_digest_output(raw, articles)
-    return digest_text, top3_links
-
-
-def _parse_digest_output(raw: str, articles: list) -> tuple:
-    """
-    Splits the LLM output into (digest_text, top3_links).
-    Looks for TOP3_JSON_START / TOP3_JSON_END markers.
-    Falls back to the top 3 articles by mention_count if parsing fails.
-    """
-    top3_links = []
-    digest_text = raw
-
-    marker_start = "TOP3_JSON_START"
-    marker_end = "TOP3_JSON_END"
-
-    if marker_start in raw and marker_end in raw:
-        try:
-            json_block = raw.split(marker_start)[1].split(marker_end)[0].strip()
-            top3_links = json.loads(json_block)
-            if not isinstance(top3_links, list):
-                top3_links = []
-            # Keep only valid URLs
-            top3_links = [l for l in top3_links if isinstance(l, str) and l.startswith("http")][:3]
-            # Strip the TOP3 block from digest text
-            digest_text = raw.split(marker_start)[0].strip()
-        except Exception as e:
-            print(f"[warn] Could not parse TOP3_JSON block: {e}")
-
-    # Fallback: use top 3 articles by mention_count
-    if len(top3_links) < 3:
-        print("[info] Falling back to mention_count ranking for top3 links")
-        top3_links = [a["link"] for a in articles[:3]]
-
-    print(f"[info] Top 3 links for rich posts: {top3_links}")
-    return digest_text, top3_links
+    items = _parse_digest_items(raw, articles)
+    return _build_digest_html(items, channel_footer)
 
 
 def select_best_article_for_single_post(articles):
@@ -854,77 +953,6 @@ def generate_single_rich_post(articles):
     image_url = selected_article.get("image_url")
 
     return post_text, image_url
-
-
-def generate_top3_rich_posts(articles: list, top3_links: list) -> list:
-    """
-    Generates 3 full rich posts for the top 3 stories identified by generate_daily_digest.
-    Matches each link back to its article object, then calls the LLM once per story.
-
-    Returns: list of (post_text, image_url) tuples — length 0-3.
-    """
-    # Build a lookup: link → article
-    link_to_article = {a["link"]: a for a in articles}
-
-    results = []
-    for rank, link in enumerate(top3_links, start=1):
-        article = link_to_article.get(link)
-        if not article:
-            print(f"[warn] Top3 link not found in articles: {link[:80]}")
-            continue
-
-        if not article.get("image_url"):
-            print(f"[info] Skipping rich post {rank}/3 (no image): {article.get('title', '')[:70]}")
-            continue
-
-        print(f"[info] Generating rich post {rank}/3: {article.get('title', '')[:70]}")
-
-        article_json = json.dumps({
-            "title": article.get("title", ""),
-            "source": article.get("source", ""),
-            "link": article.get("link", ""),
-            "summary": article.get("summary", ""),
-            "mention_count": article.get("mention_count", 1),
-            "also_covered_by": article.get("also_covered_by", []),
-        }, ensure_ascii=False, indent=2)
-
-        channel_footer = f"\n\n{TELEGRAM_CHAT_ID}" if TELEGRAM_CHAT_ID else ""
-
-        system_prompt = (
-            "تو یک سردبیر خبر هوش مصنوعی هستی. وظیفه تو ساخت یک پست تلگرامی بسیار جذاب، کامل، "
-            "خواندنی و تحلیل‌شده درباره یک خبر مهم روز است."
-        )
-
-        user_prompt = f"""
-درباره مقاله زیر، یک پست کامل، شکیل و جذاب به زبان فارسی بنویس.
-
-ساختار خروجی:
-🔥 <b>عنوان جذاب و داغ فارسی</b>
-
-یک یا دو پاراگراف توضیحات روان و کامل درباره این خبر، اهمیت آن و پیامدهای آن در صنعت هوش مصنوعی به فارسی.
-
-منبع: {article.get('source')} — <a href="{article.get('link')}">مطالعه مقاله کامل</a>
-{channel_footer}
-
-قوانین:
-- خروجی را مستقیماً از عنوان شروع کن (بدون هیچ مقدمه انگلیسی یا توضیحات اضافه).
-- عنوان جذاب با ایموجی شروع شود.
-- متن توضیحات بین ۱۵۰ تا ۲۵۰ کلمه و بسیار خوانا باشد.
-- لینک منبع دقیقاً به صورت HTML <a href="...">مطالعه مقاله کامل</a> باشد.
-- فقط متن نهایی را بدون توضیحات اضافه و بدون ```html بده.
-
-اطلاعات مقاله:
-{article_json}
-"""
-
-        try:
-            post_text = generate_llm_text(system_prompt, user_prompt)
-            image_url = article.get("image_url")
-            results.append((post_text, image_url))
-        except Exception as e:
-            print(f"[warn] Failed to generate rich post for {link[:60]}: {e}")
-
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1223,36 +1251,17 @@ def main():
         targets.add(TELEGRAM_CHAT_ID)
 
     if mode == "digest":
-        print("[info] Generating Daily Digest + Top 3 Rich Posts...")
+        print("[info] Generating Daily Digest...")
 
-        digest_text, top3_links = generate_daily_digest(articles)
+        digest_text = generate_daily_digest(articles)
 
-        # 1. Send digest post
         if digest_text:
             for chat in targets:
                 send_telegram_post(chat, digest_text, post_type="digest")
 
-        # 2. Send top 3 rich posts
-        rich_posts = generate_top3_rich_posts(articles, top3_links)
-        # for post_text, image_url in rich_posts:
-        #     if post_text:
-        #         for chat in targets:
-        #             send_telegram_post(chat, post_text, image_url, post_type="single")
-
-        # Handle on-demand digest requests
         for chat_id, req_mode in on_demand_requests:
-            if req_mode == "digest":
-                if digest_text:
-                    send_telegram_post(chat_id, digest_text, post_type="digest")
-                for post_text, image_url in rich_posts:
-                    if post_text:
-                        send_telegram_post(chat_id, post_text, image_url, post_type="single")
-            else:
-                # single mode on-demand: pick top story
-                if rich_posts:
-                    post_text, image_url = rich_posts[0]
-                    if post_text:
-                        send_telegram_post(chat_id, post_text, image_url, post_type="single")
+            if req_mode == "digest" and digest_text:
+                send_telegram_post(chat_id, digest_text, post_type="digest")
 
     else:
         # single mode: just one rich post (for manual/on-demand use)

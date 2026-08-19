@@ -5,6 +5,7 @@ Run with:
     python -m pytest test_hooshkav.py -v
 """
 
+import json
 import re
 import sys
 import types
@@ -479,125 +480,88 @@ class TestDeduplicateAndScore(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test 12: _parse_digest_output — splits digest text and top3 links correctly
+# Test 12: digest helpers — guaranteed links on every item
 # ---------------------------------------------------------------------------
-class TestParseDigestOutput(unittest.TestCase):
+class TestDigestHelpers(unittest.TestCase):
     def _make_articles(self, n=5):
         return [
-            {"title": f"Article {i}", "source": f"Source {i}",
-             "link": f"https://example.com/{i}", "summary": "",
-             "image_url": None, "published": "2026-08-17T10:00:00+00:00",
-             "mention_count": n - i, "also_covered_by": []}
+            {
+                "title": f"Article {i}",
+                "source": f"Source {i}",
+                "link": f"https://example.com/{i}",
+                "summary": f"Summary {i}",
+                "image_url": None,
+                "published": "2026-08-17T10:00:00+00:00",
+                "mention_count": n - i,
+                "also_covered_by": [],
+            }
             for i in range(n)
         ]
 
-    def test_parses_valid_markers(self):
-        """Must extract digest text and top3 links when markers are present."""
-        raw = (
-            "<b>مهم‌ترین‌ها</b>\n\nخبر ۱\n\nخبر ۲\n\n"
-            "TOP3_JSON_START\n"
-            '["https://example.com/1", "https://example.com/2", "https://example.com/3"]\n'
-            "TOP3_JSON_END"
-        )
-        articles = self._make_articles()
-        digest, links = main._parse_digest_output(raw, articles)
-        self.assertIn("مهم‌ترین‌ها", digest)
-        self.assertNotIn("TOP3_JSON_START", digest)
-        self.assertEqual(links, [
+    def test_inject_link_replaces_highlight_word(self):
+        """highlight_word must become a clickable link inside the summary."""
+        result = main._inject_link_in_summary(
+            "OpenAI یک مدل جدید معرفی کرد",
+            "OpenAI",
             "https://example.com/1",
+        )
+        self.assertIn('<a href="https://example.com/1">OpenAI</a>', result)
+
+    def test_inject_link_appends_when_word_missing(self):
+        """When highlight_word is absent, a fallback link must be appended."""
+        result = main._inject_link_in_summary(
+            "یک خبر مهم درباره هوش مصنوعی",
+            "کلمه_ناموجود",
             "https://example.com/2",
-            "https://example.com/3",
-        ])
-
-    def test_falls_back_when_no_markers(self):
-        """When markers are absent, must fall back to top 3 articles by mention_count."""
-        raw = "<b>مهم‌ترین‌ها</b>\n\nخبر ۱"
-        articles = self._make_articles(5)
-        digest, links = main._parse_digest_output(raw, articles)
-        self.assertEqual(len(links), 3)
-        self.assertEqual(links[0], articles[0]["link"])
-
-    def test_filters_invalid_urls(self):
-        """Non-http entries in the JSON block must be filtered out, triggering fallback."""
-        raw = (
-            "<b>خبر</b>\n"
-            "TOP3_JSON_START\n"
-            '["not-a-url", "https://valid.com/1", "ftp://wrong.com"]\n'
-            "TOP3_JSON_END"
         )
-        articles = self._make_articles(5)
-        _, links = main._parse_digest_output(raw, articles)
-        for l in links:
-            self.assertTrue(l.startswith("http"))
+        self.assertIn('<a href="https://example.com/2">مطالعه خبر</a>', result)
 
-    def test_strips_top3_block_from_digest_text(self):
-        """The TOP3 block must not appear in the returned digest text."""
-        raw = (
-            "<b>خبر روز</b>\n"
-            "TOP3_JSON_START\n"
-            '["https://example.com/1"]\n'
-            "TOP3_JSON_END"
-        )
-        articles = self._make_articles()
-        digest, _ = main._parse_digest_output(raw, articles)
-        self.assertNotIn("TOP3_JSON_START", digest)
-        self.assertNotIn("TOP3_JSON_END", digest)
-
-
-# ---------------------------------------------------------------------------
-# Test 13: generate_top3_rich_posts — calls LLM once per link, returns results
-# ---------------------------------------------------------------------------
-class TestGenerateTop3RichPosts(unittest.TestCase):
-    def _make_articles(self):
-        return [
-            {"title": f"AI Story {i}", "source": f"Source {i}",
-             "link": f"https://example.com/{i}", "summary": f"Summary {i}",
-             "image_url": f"https://img.example.com/{i}.jpg",
-             "published": "2026-08-17T10:00:00+00:00",
-             "mention_count": 3 - i, "also_covered_by": []}
-            for i in range(3)
+    def test_build_digest_html_includes_link_on_every_item(self):
+        """Every digest item must contain an <a href> tag."""
+        items = [
+            {"link": "https://example.com/1", "summary": "خبر اول", "highlight_word": "خبر"},
+            {"link": "https://example.com/2", "summary": "خبر دوم", "highlight_word": "دوم"},
         ]
+        html = main._build_digest_html(items)
+        self.assertIn("مهم‌ترین‌های ۲۴ ساعت", html)
+        self.assertEqual(html.count("<a href="), 2)
 
-    def test_generates_post_for_each_link(self):
-        """Must return one (post_text, image_url) tuple per valid link."""
-        articles = self._make_articles()
-        links = [a["link"] for a in articles]
-        with patch.object(main, "generate_llm_text", return_value="پست تولید شده"):
-            results = main.generate_top3_rich_posts(articles, links)
-        self.assertEqual(len(results), 3)
-        for post_text, image_url in results:
-            self.assertEqual(post_text, "پست تولید شده")
+    def test_parse_digest_items_validates_links(self):
+        """Parsed items must use links that exist in the input articles."""
+        raw = json.dumps({
+            "items": [
+                {
+                    "link": "https://example.com/1",
+                    "summary": "خبر معتبر",
+                    "highlight_word": "خبر",
+                },
+                {
+                    "link": "https://unknown.com/999",
+                    "summary": "خبر نامعتبر",
+                    "highlight_word": "خبر",
+                },
+            ]
+        })
+        articles = self._make_articles(5)
+        items = main._parse_digest_items(raw, articles)
+        links = {item["link"] for item in items}
+        self.assertIn("https://example.com/1", links)
+        self.assertNotIn("https://unknown.com/999", links)
 
-    def test_skips_links_not_in_articles(self):
-        """Links that don't match any article must be skipped gracefully."""
-        articles = self._make_articles()
-        links = ["https://unknown.com/999", articles[0]["link"]]
-        with patch.object(main, "generate_llm_text", return_value="پست"):
-            results = main.generate_top3_rich_posts(articles, links)
-        self.assertEqual(len(results), 1)
-
-    def test_handles_llm_failure_gracefully(self):
-        """If LLM fails for one post, others must still be generated."""
-        articles = self._make_articles()
-        links = [a["link"] for a in articles]
-        call_count = 0
-
-        def mock_llm(sys_p, usr_p):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
-                raise RuntimeError("LLM error")
-            return "پست"
-
-        with patch.object(main, "generate_llm_text", side_effect=mock_llm):
-            results = main.generate_top3_rich_posts(articles, links)
-        self.assertEqual(len(results), 2)
-
-    def test_empty_links_returns_empty(self):
-        """Empty links list must return empty results list."""
-        articles = self._make_articles()
-        results = main.generate_top3_rich_posts(articles, [])
-        self.assertEqual(results, [])
+    def test_parse_digest_items_fills_to_target_count(self):
+        """Parser must fill up to TARGET_DIGEST_COUNT using top articles."""
+        raw = json.dumps({
+            "items": [
+                {
+                    "link": "https://example.com/0",
+                    "summary": "تنها خبر معتبر",
+                    "highlight_word": "تنها",
+                }
+            ]
+        })
+        articles = self._make_articles(main.TARGET_DIGEST_COUNT)
+        items = main._parse_digest_items(raw, articles)
+        self.assertEqual(len(items), main.TARGET_DIGEST_COUNT)
 
 
 if __name__ == "__main__":

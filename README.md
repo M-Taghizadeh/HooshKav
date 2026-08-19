@@ -9,7 +9,7 @@ An automated, fully free system that collects the most important AI news from 50
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        GITHUB ACTIONS (Cron)                        │
-│   08:30 UTC → digest mode      08:00 / 12:00 / 16:00 UTC → single   │
+│              04:30 UTC → daily digest (08:00 Iran time)             │
 └────────────────────────┬────────────────────────────────────────────┘
                          │
                          ▼
@@ -21,8 +21,7 @@ An automated, fully free system that collects the most important AI news from 50
 │   Anthropic, OpenAI, DeepMind,      models, policy, research)       │
 │   ArXiv cs.AI/LG/CL, MIT, ...)                                      │
 │                                                                     │
-│  digest: last 24 hours             single: last 8 hours only        │
-│  Articles without a date → dropped                                  │
+│  Last 24 hours — articles without a date are dropped                │
 └────────────────────────┬────────────────────────────────────────────┘
                          │
                          ▼
@@ -38,43 +37,28 @@ An automated, fully free system that collects the most important AI news from 50
 │  6. Sort by mention_count DESC (most-covered story first)           │
 └────────────────────────┬────────────────────────────────────────────┘
                          │
-              ┌──────────┴──────────┐
-              │                     │
-              ▼                     ▼
-     ┌────────────────┐    ┌─────────────────────┐
-     │  DIGEST MODE   │    │    SINGLE MODE       │
-     │  (08:30 UTC)   │    │ (08/12/16 UTC)       │
-     └───────┬────────┘    └──────────┬───────────┘
-             │                        │
-             ▼                        ▼
-┌────────────────────────┐  ┌─────────────────────────────────────────┐
-│   LLM CALL 1 (digest)  │  │         LLM CALL 1 (select)             │
-│                        │  │                                         │
-│  Input: all articles   │  │  Input: article list + mention_count    │
-│  + mention_count       │  │  Output: index of most important story  │
-│                        │  └──────────────────┬──────────────────────┘
-│  Output:               │                     │
-│  • Digest post (10     │                     ▼
-│    news items in       │  ┌─────────────────────────────────────────┐
-│    Persian HTML)       │  │         LLM CALL 2 (write post)         │
-│  • TOP3_JSON block     │  │                                         │
-│    (3 best link URLs)  │  │  Input: selected article                │
-└───────┬────────────────┘  │  Output: full rich Persian post         │
-        │                   └──────────────────┬──────────────────────┘
-        ▼                                      │
-┌───────────────────┐                          │
-│  LLM CALLS 2-4    │                          │
-│  (3x rich posts)  │                          │
-│                   │                          │
-│  One call per     │                          │
-│  top-3 story →    │                          │
-│  full Persian     │                          │
-│  analysis post    │                          │
-└───────┬───────────┘                          │
-        │                                      │
-        └──────────────────┬───────────────────┘
-                           │
-                           ▼
+                         ▼
+┌────────────────────────┐
+│   LLM CALL (digest)    │
+│                        │
+│  Input: all articles   │
+│  + mention_count       │
+│                        │
+│  Output: JSON with     │
+│  10 selected links +   │
+│  Persian summaries     │
+└───────┬────────────────┘
+        │
+        ▼
+┌───────────────────┐
+│  BUILD DIGEST     │
+│  (programmatic)   │
+│                   │
+│  Injects <a href> │
+│  on every item    │
+└───────┬───────────┘
+        │
+        ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                  STEP 4 — LLM PROVIDER FALLBACK                     │
 │                                                                     │
@@ -105,10 +89,7 @@ An automated, fully free system that collects the most important AI news from 50
 └─────────────────────────────────────────────────────────────────────┘
 
 Daily Output:
-  08:00 Iran → 1 digest post (10 headlines) + 3 full analysis posts
-  11:30 Iran → 1 fresh rich post (last 8h news only)
-  15:30 Iran → 1 fresh rich post (last 8h news only)
-  19:30 Iran → 1 fresh rich post (last 8h news only)
+  08:00 Iran → 1 digest post (10 headlines with source links)
 ```
 
 ---
@@ -118,11 +99,11 @@ Daily Output:
 - **50 AI-specific RSS feeds** — all scoped to AI/ML: lab blogs (OpenAI, DeepMind, Anthropic, Meta AI, Mistral), research (ArXiv cs.AI/LG/CL, Papers With Code), news (TechCrunch AI, The Verge AI, MIT Tech Review, Wired AI), newsletters (Import AI, TLDR AI, Last Week in AI), and more.
 - **Semantic deduplication** — TF-IDF cosine similarity clusters near-duplicate titles across sources; `mention_count` tracks how many outlets covered the same story.
 - **mention_count signal** — stories covered by more sources rank higher in the LLM prompt, producing more reliable importance scoring.
-- **Strict time windows** — digest uses last 24 hours; single posts use last 8 hours to avoid repeating morning stories.
+- **Strict time window** — digest covers the last 24 hours of AI news.
 - **Multi-provider LLM fallback** — Gemini → Groq (Llama 3.3 70B) → OpenRouter; all free tiers.
 - **Safe HTML output** — balanced tags, safe truncation, markdown-to-HTML conversion, Telegram parse mode compatibility.
 - **Telegram retry** — handles rate limits (429) with exponential backoff.
-- **On-demand commands** — authorized user (`ALLOWED_TELEGRAM_USER`) can trigger `/digest` or `/single` from Telegram at any time.
+- **On-demand command** — authorized user (`ALLOWED_TELEGRAM_USER`) can trigger `/digest` from Telegram at any time.
 
 ---
 
@@ -170,12 +151,8 @@ cp .env.example .env
 # Preview digest output in terminal (no Telegram send)
 python test_send.py digest
 
-# Preview single post output in terminal
-python test_send.py single
-
 # Run the full bot (sends to Telegram)
 python main.py digest
-python main.py single
 
 # Run tests
 python -m pytest test_hooshkav.py -v
@@ -188,8 +165,7 @@ python -m pytest test_hooshkav.py -v
 | Variable | Default | Description |
 |:---|:---|:---|
 | `TARGET_DIGEST_COUNT` | `10` | Number of headlines in the daily digest |
-| `LOOKBACK_HOURS` | `24` | Time window for digest mode |
-| `LOOKBACK_HOURS_SINGLE` | `8` | Time window for single post mode |
+| `LOOKBACK_HOURS` | `24` | Time window for the daily digest |
 | `MAX_PER_FEED` | `5` | Max articles per RSS feed |
 | `MAX_PER_DYNAMIC_FEED` | `10` | Max articles per Google News feed |
 | `RSS_FEEDS` | 50 entries | List of AI-specific RSS feeds |
@@ -201,7 +177,4 @@ python -m pytest test_hooshkav.py -v
 
 | UTC | Iran Winter (IRST +3:30) | Iran Summer (IRDT +4:30) | Mode |
 |:---|:---|:---|:---|
-| 04:30 | 08:00 | 09:00 | digest + 3 rich posts |
-| 08:00 | 11:30 | 12:30 | single (last 8h) |
-| 12:00 | 15:30 | 16:30 | single (last 8h) |
-| 16:00 | 19:30 | 20:30 | single (last 8h) |
+| 04:30 | 08:00 | 09:00 | digest (10 headlines) |

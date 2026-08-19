@@ -1,29 +1,11 @@
-name: Hooshkav - Daily Digest + 3x Fresh Single Posts
+name: Hooshkav - Daily Digest
 
 on:
   schedule:
-    # --- DIGEST (10 top stories of the day) ---
     # 08:00 Iran winter (IRST=UTC+3:30) | 09:00 Iran summer (IRDT=UTC+4:30)
     - cron: "30 4 * * *"
 
-    # --- SINGLE RICH POSTS (fresh news from last 8 hours only) ---
-    # ~11:30 Iran winter / ~12:30 Iran summer
-    - cron: "0 8 * * *"
-    # ~15:30 Iran winter / ~16:30 Iran summer
-    - cron: "0 12 * * *"
-    # ~19:30 Iran winter / ~20:30 Iran summer
-    - cron: "0 16 * * *"
-
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Post Mode (digest or single)'
-        required: true
-        default: 'digest'
-        type: choice
-        options:
-          - digest
-          - single
 
   repository_dispatch:
     types: [telegram_on_demand, generate_digest]
@@ -49,11 +31,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALLOWED_TELEGRAM_USER: ${{ secrets.ALLOWED_TELEGRAM_USER }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python main.py ${{ inputs.mode }}
-          elif [ "${{ github.event.schedule }}" = "30 4 * * *" ]; then
-            python main.py digest
-          else
-            python main.py single
-          fi
+        run: python main.py digest

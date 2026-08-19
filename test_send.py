@@ -35,24 +35,10 @@ if mode == "single":
     if image_url:
         print(f"\n📷 Image: {image_url}")
 else:
-    digest_text, top3_links = main.generate_daily_digest(articles)
+    digest_text = main.generate_daily_digest(articles)
     cleaned = main.clean_html_for_telegram(digest_text or "", post_type="digest")
     print("─" * 60)
     print(cleaned)
     print("─" * 60)
-    print(f"\n🔝 Top 3 links for rich posts:")
-    for i, link in enumerate(top3_links, 1):
-        print(f"  {i}. {link}")
-
-    if top3_links:
-        print("\n─── Rich Posts Preview ───")
-        rich_posts = main.generate_top3_rich_posts(articles, top3_links)
-        for i, (post_text, image_url) in enumerate(rich_posts, 1):
-            print(f"\n{'─'*60}")
-            print(f"Rich Post {i}/3:")
-            print("─" * 60)
-            print(main.clean_html_for_telegram(post_text or "", post_type="single"))
-            if image_url:
-                print(f"\n📷 Image: {image_url}")
 
 print("\nDone.")
