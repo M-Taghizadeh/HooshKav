@@ -107,7 +107,7 @@ LOOKBACK_HOURS = 24        # strict 24-hour window for digest mode
 LOOKBACK_HOURS_SINGLE = 8  # single posts only cover last 8 hours (fresh news only)
 MAX_PER_FEED = 5
 MAX_PER_DYNAMIC_FEED = 10
-TARGET_DIGEST_COUNT = 10
+TARGET_DIGEST_COUNT = 5
 
 # Telegram caption hard limit (in characters)
 TELEGRAM_CAPTION_LIMIT = 1024
