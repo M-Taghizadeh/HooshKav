@@ -467,8 +467,15 @@ def deduplicate_and_score(articles, similarity_threshold=0.55):
         })
         deduped.append(representative)
 
-    # Sort by mention_count desc, then by published desc
-    deduped.sort(key=lambda a: (a["mention_count"], a.get("published") or ""), reverse=True)
+    # Sort by mention_count desc, then has_image, then by published desc
+    deduped.sort(
+        key=lambda a: (
+            a["mention_count"],
+            1 if a.get("image_url") else 0,
+            a.get("published") or "",
+        ),
+        reverse=True,
+    )
 
     print(f"[info] After dedup: {len(articles)} → {len(deduped)} unique stories "
           f"(threshold={similarity_threshold})")
@@ -653,7 +660,23 @@ def generate_llm_text(system_prompt, user_prompt):
 # Step 3: Digest Generation & Single Rich Post Generation
 # ---------------------------------------------------------------------------
 
+# Category-based emojis for digest items (matched by LLM to topic)
 DIGEST_EMOJIS = ["🧠", "📋", "🛠", "🔐", "💸", "🎬", "🚀", "⚡", "🌐", "📊"]
+
+# Thematic emojis for digest — LLM picks the best fit per news item
+CATEGORY_EMOJIS = {
+    "model":      "🤖",   # new AI model / LLM release
+    "research":   "🔬",   # research paper / academic
+    "tool":       "🛠",   # developer tool / SDK / API
+    "business":   "💰",   # funding / acquisition / startup
+    "safety":     "🔐",   # AI safety / regulation / policy
+    "education":  "🎓",   # education / tutorial / learning
+    "product":    "🚀",   # product launch / feature release
+    "data":       "📊",   # dataset / benchmark
+    "hardware":   "⚡",   # chip / hardware / infrastructure
+    "society":    "⚖️",   # ethics / society / law
+    "other":      "📌",   # fallback
+}
 
 
 def _extract_json_from_llm(raw: str):
@@ -696,17 +719,44 @@ def _inject_link_in_summary(summary: str, word: str, link: str) -> str:
 
 
 def _build_digest_html(items: list, channel_footer: str = "") -> str:
-    """Builds the final Telegram digest HTML with guaranteed links on every item."""
-    lines = ["<b>مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی</b>", ""]
+    """
+    Builds the final Telegram digest HTML.
+
+    Expected output format (matches user-approved sample):
+
+        مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی
+
+         🎓 خبر ۱: (https://...) خلاصه فارسی خبر ...
+
+         🤖 خبر ۲: (https://...) خلاصه فارسی خبر ...
+
+        @channel
+    """
+    # Persian digit map
+    persian_digits = {"0": "۰", "1": "۱", "2": "۲", "3": "۳", "4": "۴",
+                      "5": "۵", "6": "۶", "7": "۷", "8": "۸", "9": "۹"}
+
+    def to_persian_num(n: int) -> str:
+        return "".join(persian_digits.get(d, d) for d in str(n))
+
+    lines = ["مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی", ""]
 
     for i, item in enumerate(items):
-        emoji = DIGEST_EMOJIS[i % len(DIGEST_EMOJIS)]
-        summary = _inject_link_in_summary(
-            item.get("summary", "").strip(),
-            item.get("highlight_word", ""),
-            item.get("link", ""),
-        )
-        lines.append(f"{emoji} <b>خبر {i + 1}:</b> {summary}")
+        # Pick emoji: LLM may supply a 'category' key, otherwise fall back to list
+        category = item.get("category", "").lower().strip()
+        emoji = CATEGORY_EMOJIS.get(category, DIGEST_EMOJIS[i % len(DIGEST_EMOJIS)])
+
+        summary = item.get("summary", "").strip()
+        link    = item.get("link", "").strip()
+
+        # Format: " 🎓 خبر ۱: (URL) خلاصه خبر"
+        num = to_persian_num(i + 1)
+        if link and link.startswith("http"):
+            line = f" {emoji} خبر {num}: ({link}) {summary}"
+        else:
+            line = f" {emoji} خبر {num}: {summary}"
+
+        lines.append(line)
         lines.append("")
 
     if channel_footer:
@@ -727,7 +777,7 @@ def _fallback_digest_items(articles: list, count: int = TARGET_DIGEST_COUNT) -> 
         items.append({
             "link": article.get("link", ""),
             "summary": summary,
-            "highlight_word": source or title.split()[0] if title else "منبع",
+            "category": "other",
         })
     return items
 
@@ -758,7 +808,7 @@ def _parse_digest_items(raw: str, articles: list) -> list:
 
         link = (item.get("link") or "").strip()
         summary = (item.get("summary") or "").strip()
-        highlight_word = (item.get("highlight_word") or "").strip()
+        category = (item.get("category") or "other").strip().lower()
 
         if not link or link not in link_to_article or link in seen_links:
             continue
@@ -766,10 +816,17 @@ def _parse_digest_items(raw: str, articles: list) -> list:
             article = link_to_article[link]
             summary = article.get("title", "").strip() or "خبر مهم هوش مصنوعی"
 
+        # Validate summary is mostly Persian (quick heuristic: count ASCII letters)
+        ascii_letters = sum(1 for c in summary if c.isascii() and c.isalpha())
+        total_letters = sum(1 for c in summary if c.isalpha())
+        if total_letters > 0 and ascii_letters / total_letters > 0.6:
+            print(f"[warn] Summary appears non-Persian (ASCII ratio={ascii_letters/total_letters:.2f}), skipping: {summary[:60]}")
+            continue
+
         valid_items.append({
             "link": link,
             "summary": summary,
-            "highlight_word": highlight_word,
+            "category": category,
         })
         seen_links.add(link)
 
@@ -785,7 +842,7 @@ def _parse_digest_items(raw: str, articles: list) -> list:
             valid_items.append({
                 "link": link,
                 "summary": article.get("title", "").strip() or "خبر مهم هوش مصنوعی",
-                "highlight_word": article.get("source", "").strip() or "منبع",
+                "category": "other",
             })
             seen_links.add(link)
             if len(valid_items) >= TARGET_DIGEST_COUNT:
@@ -794,14 +851,77 @@ def _parse_digest_items(raw: str, articles: list) -> list:
     return valid_items[:TARGET_DIGEST_COUNT]
 
 
+def _quality_score(article: dict) -> float:
+    """
+    Assigns a quality score to an article based on source authority,
+    mention count, and title signal words.
+    Higher = more likely to be selected for the digest.
+    """
+    score = 0.0
+
+    # Tier-1 sources get a bonus (authoritative AI-specific outlets)
+    tier1_sources = {
+        "OpenAI Blog", "Google DeepMind Blog", "Anthropic News", "Meta AI Blog",
+        "Microsoft AI Blog", "Hugging Face Blog", "MIT Technology Review AI",
+        "TechCrunch AI", "VentureBeat AI", "The Verge AI", "Wired AI",
+        "ArXiv CS.AI (new)", "ArXiv CS.LG (Machine Learning)", "ArXiv CS.CL (NLP/LLM)",
+        "Papers With Code", "Import AI (Jack Clark)", "Mistral AI Blog",
+    }
+    if article.get("source") in tier1_sources:
+        score += 3.0
+
+    # Mention count is the strongest signal
+    score += min(article.get("mention_count", 1) * 2.0, 10.0)
+
+    # Title keyword signals
+    title_lower = article.get("title", "").lower()
+    high_value_keywords = [
+        "release", "launch", "announces", "introduces", "new model",
+        "open source", "open-source", "benchmark", "breakthrough",
+        "raises", "funding", "acqui", "billion", "million",
+        "gpt", "claude", "gemini", "llama", "mistral", "deepseek",
+        "regulation", "safety", "alignment", "policy",
+        "agent", "multimodal", "reasoning", "fine-tun",
+    ]
+    for kw in high_value_keywords:
+        if kw in title_lower:
+            score += 1.0
+
+    # Penalize low-signal titles
+    low_value_keywords = ["how to", "tutorial", "explained", "what is", "guide to", "tips for"]
+    for kw in low_value_keywords:
+        if kw in title_lower:
+            score -= 1.5
+
+    # Bonus for having an image (visual posts perform better)
+    if article.get("image_url"):
+        score += 0.5
+
+    return score
+
+
+def filter_and_rank_articles(articles: list, top_n: int = 40) -> list:
+    """
+    Filters out low-quality articles and returns the top_n by quality score.
+    This runs before the LLM to reduce prompt size and improve selection quality.
+    """
+    scored = [(a, _quality_score(a)) for a in articles]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = [a for a, _ in scored[:top_n]]
+    print(f"[info] Quality filter: {len(articles)} → {len(top)} articles sent to LLM")
+    return top
+
+
 def generate_daily_digest(articles):
     """
-    Generates the daily digest post with guaranteed source links on every item.
-
+    Generates the daily digest post.
     Returns: digest_text (str)
     """
+    # Pre-filter to top quality articles before sending to LLM
+    top_articles = filter_and_rank_articles(articles, top_n=40)
+
     compact = []
-    for a in articles:
+    for a in top_articles:
         compact.append({
             "title": a["title"],
             "source": a["source"],
@@ -812,41 +932,44 @@ def generate_daily_digest(articles):
         })
 
     articles_json = json.dumps(compact, ensure_ascii=False, indent=2)
-    channel_footer = f"\n\n{TELEGRAM_CHAT_ID}" if TELEGRAM_CHAT_ID else ""
+    channel_footer = TELEGRAM_CHAT_ID if TELEGRAM_CHAT_ID else ""
 
     system_prompt = (
-        "تو یک روزنامه‌نگار و فیلترکننده ارشد اخبار فناوری و هوش مصنوعی هستی. "
-        f"وظیفه تو انتخاب {TARGET_DIGEST_COUNT} خبر مهم و نوشتن خلاصه فارسی برای هر کدام است."
+        "تو یک روزنامه‌نگار ارشد متخصص در حوزه هوش مصنوعی هستی که برای مخاطبان فارسی‌زبان "
+        "فنی و توسعه‌دهنده می‌نویسی. "
+        "تمام خروجی‌ات باید ۱۰۰٪ به زبان فارسی روان و تخصصی باشد — هیچ کلمه انگلیسی، "
+        "هیچ جمله انگلیسی، و هیچ ترجمه‌نشده‌ای مجاز نیست. "
+        "اگر نام یک محصول یا شرکت انگلیسی است (مثل GPT-4، Claude، Gemini) می‌توانی نام را "
+        "نگه داری ولی توضیحات اطرافش باید کاملاً فارسی باشد."
     )
 
     user_prompt = f"""
-از بین مقالات ورودی زیر (که از بیش از ۵۰ منبع مختلف جهانی جمع‌آوری و پردازش شده‌اند):
+از بین مقالات ورودی زیر (که از بیش از ۵۰ منبع مختلف جهانی جمع‌آوری شده‌اند)، دقیقاً {TARGET_DIGEST_COUNT} خبر انتخاب کن.
 
-نکته مهم: هر مقاله یک فیلد «mention_count» دارد که نشان می‌دهد چند منبع مختلف همین خبر را پوشش داده‌اند.
-خبری که mention_count بالاتری دارد اهمیت بیشتری دارد و باید در اولویت انتخاب قرار گیرد.
+معیارهای انتخاب (به ترتیب اولویت):
+۱. خبرهایی که mention_count بالاتری دارند — یعنی چند منبع مختلف آن‌ها را پوشش داده‌اند
+۲. خبرهای فنی و کاربردی که برای توسعه‌دهندگان، محققان، و متخصصان AI مفید هستند
+۳. معرفی مدل‌های جدید، ابزارهای توسعه، پیشرفت‌های پژوهشی، تامین مالی مهم، قوانین جدید
+۴. از اخبار سطحی، تکراری، یا صرفاً تبلیغاتی بپرهیز
 
-بالضبط {TARGET_DIGEST_COUNT} خبر بسیار مهم و متنوع هوش مصنوعی را انتخاب کن.
-
-خروجی فقط یک JSON معتبر باشد (بدون ```json و بدون توضیح اضافه) با این ساختار:
+خروجی فقط یک JSON معتبر باشد (بدون ```json و بدون توضیح اضافه) با این ساختار دقیق:
 
 {{
   "items": [
     {{
-      "link": "لینک دقیق مقاله از فیلد link ورودی",
-      "summary": "خلاصه کوتاه، روان و کاربردی خبر به فارسی (بدون HTML)",
-      "highlight_word": "یک کلمه کلیدی از summary که باید لینک‌دار شود"
+      "link": "لینک دقیق مقاله از فیلد link ورودی (بدون تغییر)",
+      "summary": "خلاصه کوتاه، روان، تخصصی و کاملاً فارسی (۱ تا ۲ جمله، ۳۰ تا ۵۰ کلمه، بدون HTML)",
+      "category": "یکی از: model | research | tool | business | safety | education | product | data | hardware | society | other"
     }}
   ]
 }}
 
-قوانین الزامی:
-- دقیقاً {TARGET_DIGEST_COUNT} آیتم در items باشد.
-- فیلد link باید عیناً از فیلد link مقالات ورودی کپی شود.
-- highlight_word باید دقیقاً یکی از کلمات داخل summary باشد.
-- اخبار با mention_count بالاتر را در اولویت قرار بده.
-- اخبار را از منابع متنوع انتخاب کن.
-- summary نباید HTML یا لینک داشته باشد.
-- اخبار باید به زبان **فارسی** روان ترجمه شوند
+قوانین الزامی — نقض هر کدام خروجی را باطل می‌کند:
+- دقیقاً {TARGET_DIGEST_COUNT} آیتم در items باشد
+- فیلد link باید عیناً از فیلد link مقالات ورودی کپی شود — هیچ تغییری نده
+- summary باید ۱۰۰٪ فارسی روان باشد — حتی یک جمله انگلیسی هم مجاز نیست
+- اخبار متنوع از دسته‌های مختلف (مدل، ابزار، پژوهش، کسب‌وکار، ...) انتخاب کن
+- از نوشتن خلاصه‌های تکراری یا مشابه خودداری کن
 
 مقالات ورودی:
 {articles_json}
@@ -863,8 +986,13 @@ def select_best_article_for_single_post(articles):
     Falls back to first article with an image if LLM fails.
     Returns None if no articles have an image.
     """
-    # Only consider articles that have an image
-    candidates_with_image = [a for a in articles if a.get("image_url")]
+    # Pre-filter quality, then keep only those with an image
+    top_articles = filter_and_rank_articles(articles, top_n=30)
+    candidates_with_image = [a for a in top_articles if a.get("image_url")]
+
+    # Fallback: if top-30 has no images, expand search to all
+    if not candidates_with_image:
+        candidates_with_image = [a for a in articles if a.get("image_url")]
 
     if not candidates_with_image:
         print("[warn] No articles with images found — skipping single post")
@@ -924,27 +1052,28 @@ def generate_single_rich_post(articles):
     channel_footer = f"\n\n{TELEGRAM_CHAT_ID}" if TELEGRAM_CHAT_ID else ""
 
     system_prompt = (
-        "تو یک سردبیر خبر هوش مصنوعی هستی. وظیفه تو ساخت یک پست تلگرامی بسیار جذاب، کامل، "
-        "خواندنی و تحلیل‌شده درباره مهم‌ترین خبر روز است."
+        "تو یک سردبیر و تحلیلگر ارشد خبر هوش مصنوعی هستی که برای مخاطبان فارسی‌زبان فنی می‌نویسی. "
+        "تمام خروجی‌ات باید ۱۰۰٪ به زبان فارسی روان و تخصصی باشد — هیچ جمله یا پاراگراف انگلیسی مجاز نیست. "
+        "نام‌های خاص محصولات و شرکت‌ها (مثل GPT-4o، Claude Sonnet، Gemini) را می‌توانی نگه داری."
     )
 
     user_prompt = f"""
-درباره مقاله زیر، یک پست کامل، شکیل و جذاب به زبان فارسی بنویس.
+درباره مقاله زیر، یک پست کامل، شکیل و تحلیلی به زبان فارسی روان بنویس.
 
-ساختار خروجی:
+ساختار خروجی (دقیقاً همین فرمت):
 🔥 <b>عنوان جذاب و داغ فارسی</b>
 
-یک یا دو پاراگراف توضیحات روان و کامل درباره این خبر، اهمیت آن و پیامدهای آن در صنعت هوش مصنوعی به فارسی.
+[یک یا دو پاراگراف تحلیلی — ببین این خبر چه چیزی را تغییر می‌دهد، چرا اهمیت دارد، و چه پیامدی برای توسعه‌دهندگان یا صنعت AI دارد]
 
 منبع: {selected_article.get('source')} — <a href="{selected_article.get('link')}">مطالعه مقاله کامل</a>
 {channel_footer}
 
-قوانین:
-- خروجی را مستقیماً از عنوان شروع کن (بدون هیچ مقدمه انگلیسی یا توضیحات اضافه).
-- عنوان جذاب با ایموجی شروع شود.
-- متن توضیحات بین ۱۵۰ تا ۲۵۰ کلمه و بسیار خوانا باشد.
-- لینک منبع دقیقاً به صورت HTML <a href="...">مطالعه مقاله کامل</a> باشد.
-- فقط متن نهایی را بدون توضیحات اضافه و بدون ```html بده.
+قوانین الزامی:
+- خروجی را مستقیماً از عنوان شروع کن (بدون هیچ مقدمه، توضیح یا متن انگلیسی).
+- عنوان با ایموجی شروع شود و با <b> و </b> احاطه شود.
+- تمام متن توضیحات (۱۵۰ تا ۲۵۰ کلمه) باید فارسی روان و تخصصی باشد.
+- لینک منبع دقیقاً به صورت <a href="...">مطالعه مقاله کامل</a> باشد.
+- هیچ ```html یا توضیحات اضافه در خروجی نباشد.
 
 اطلاعات مقاله:
 {article_json}
@@ -999,32 +1128,37 @@ def clean_html_for_telegram(text, post_type="digest"):
     """
     Cleans up LLM text, strips preambles, balances tags, and converts markdown to HTML.
     post_type: 'digest' or 'single' — controls how preamble stripping works.
+
+    For digest: output is plain text (no HTML), just strip any accidental fences.
+    For single: output is HTML, full cleaning applied.
     """
     if not text:
         return text
 
     # Strip markdown code fences
     text = re.sub(r"^```html\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE).strip()
 
     if post_type == "digest":
-        # For digest: strip everything before the expected header
-        title_match = re.search(r"(<b>\s*مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
+        # Digest is plain text — strip any accidental HTML and return as-is
+        # Strip anything before the header line
+        title_match = re.search(r"(مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
         if title_match:
             text = title_match.group(1)
-        else:
-            title_match = re.search(r"(مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
-            if title_match:
-                text = title_match.group(1)
-    else:
-        # For single posts: strip any plain-text or English preamble before the first emoji/bold tag
-        # Look for start of actual post content (emoji or <b> tag)
-        content_match = re.search(
-            r"([🔥🚀🧠📋🛠🔐💸🎬⚡🌐🤖💡🔬📡🏆]|<b>)",
-            text
-        )
-        if content_match:
-            text = text[content_match.start():]
+        # Remove any HTML tags that may have leaked in
+        text = re.sub(r"<[^>]+>", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text
+
+    # --- single post: full HTML cleaning ---
+    # Strip any plain-text or English preamble before the first emoji/bold tag
+    content_match = re.search(
+        r"([🔥🚀🧠📋🛠🔐💸🎬⚡🌐🤖💡🔬📡🏆]|<b>)",
+        text
+    )
+    if content_match:
+        text = text[content_match.start():]
 
     # Convert markdown links [title](url) to HTML <a href="url">title</a>
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', text)
@@ -1069,7 +1203,6 @@ def clean_html_for_telegram(text, post_type="digest"):
 
         balanced_lines.append(line)
 
-    # Remove leading/trailing blank lines, collapse internal multiple blanks
     result = "\n".join(balanced_lines)
     result = re.sub(r"\n{3,}", "\n\n", result).strip()
     return result
@@ -1107,20 +1240,29 @@ def _telegram_request(method, payload, retries=3):
 
 
 def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest"):
-    """Sends text or photo post with caption to Telegram, with retry and safe truncation."""
+    """Sends text or photo post to Telegram, with retry and safe truncation.
+
+    Digest posts are plain text (no parse_mode).
+    Single posts use HTML parse_mode.
+    """
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set.")
 
     cleaned_text = clean_html_for_telegram(html_text, post_type=post_type)
 
-    if image_url:
+    # Digest is plain text; single is HTML
+    use_html = (post_type == "single")
+
+    if image_url and post_type == "single":
         caption = safe_truncate_html(cleaned_text, TELEGRAM_CAPTION_LIMIT)
-        resp = _telegram_request("sendPhoto", {
+        payload = {
             "chat_id": chat_id,
             "photo": image_url,
             "caption": caption,
-            "parse_mode": "HTML",
-        })
+        }
+        if use_html:
+            payload["parse_mode"] = "HTML"
+        resp = _telegram_request("sendPhoto", payload)
         if resp is not None and resp.ok:
             print(f"[info] Photo message successfully sent to Telegram: {chat_id}")
             return
@@ -1128,18 +1270,23 @@ def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest"):
             status = resp.status_code if resp is not None else "timeout"
             print(f"[warn] sendPhoto failed ({status}), falling back to sendMessage")
 
-    # Send as text message (with HTML)
-    text_body = safe_truncate_html(cleaned_text, TELEGRAM_MESSAGE_LIMIT)
-    resp = _telegram_request("sendMessage", {
+    # Send as text message
+    limit = TELEGRAM_MESSAGE_LIMIT
+    text_body = safe_truncate_html(cleaned_text, limit) if use_html else cleaned_text[:limit]
+
+    payload = {
         "chat_id": chat_id,
         "text": text_body,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": not bool(image_url),
-    })
+        "disable_web_page_preview": True,
+    }
+    if use_html:
+        payload["parse_mode"] = "HTML"
+
+    resp = _telegram_request("sendMessage", payload)
 
     if resp is None or not resp.ok:
         status = resp.status_code if resp is not None else "timeout"
-        print(f"[warn] Telegram HTML sendMessage failed ({status}), retrying as plain text")
+        print(f"[warn] Telegram sendMessage failed ({status}), retrying as plain text")
         plain_text = re.sub(r"<[^>]+>", "", cleaned_text)[:TELEGRAM_MESSAGE_LIMIT]
         resp_fallback = _telegram_request("sendMessage", {
             "chat_id": chat_id,
