@@ -140,16 +140,23 @@ html, body {
 }
 
 /* ── Cards ── */
-.cards { display: flex; flex-direction: column; gap: 28px; }
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  flex: 1;
+}
 
 .card {
   position: relative; border-radius: 28px;
-  padding: 44px 52px;
-  display: flex; align-items: flex-start; gap: 32px;
+  padding: 0 52px;
+  display: flex; align-items: center; gap: 32px;
   overflow: hidden;
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   backdrop-filter: blur(12px);
+  flex: 1;
+  min-height: 0;
 }
 
 /* right glow strip */
@@ -196,11 +203,17 @@ html, body {
 
 .card-body { flex: 1; position: relative; z-index: 1; }
 
+.card-body { flex: 1; position: relative; z-index: 1; overflow: hidden; }
+
 .card-text {
-  font-size: 12px; font-weight: 500;
+  font-size: clamp(20px, 2.2vh, 36px);
+  font-weight: 500;
   color: var(--card-text-color);
-  line-height: 1.2;
-  text-align: justify;
+  line-height: 1.6;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 /* ── Footer ── */
@@ -268,35 +281,22 @@ html, body {
 </div>
 
 <script>
-(function fitAndDistribute() {
-  // 1. fit font size per card
-  const MAX_FONT = 33, MIN_FONT = 22, STEP = 0.5;
-  document.querySelectorAll('.card').forEach(card => {
-    const textEl = card.querySelector('.card-text');
-    if (!textEl) return;
-    let size = MAX_FONT;
-    textEl.style.fontSize = size + 'px';
-    while (size > MIN_FONT && textEl.scrollHeight > textEl.clientHeight + 1) {
-      size -= STEP; textEl.style.fontSize = size + 'px';
+<script>
+// Cards already use flex:1 to fill space equally.
+// JS only fine-tunes the gap after layout is complete.
+(function adjustGap() {
+  const cardsEl = document.querySelector('.cards');
+  if (!cardsEl) return;
+  // gap is already set via CSS; just ensure no overflow on page
+  const page = document.querySelector('.page');
+  if (page && page.scrollHeight > page.clientHeight) {
+    const cards = cardsEl.querySelectorAll('.card');
+    let gap = 24;
+    while (gap > 8 && page.scrollHeight > page.clientHeight) {
+      gap -= 2;
+      cardsEl.style.gap = gap + 'px';
     }
-    while (size < MAX_FONT) {
-      const next = size + STEP;
-      textEl.style.fontSize = next + 'px';
-      if (textEl.scrollHeight > textEl.clientHeight + 1) { textEl.style.fontSize = size + 'px'; break; }
-      size = next;
-    }
-  });
-
-  // 2. distribute remaining space as gap
-  const cardsEl   = document.querySelector('.cards');
-  const cardNodes = cardsEl.querySelectorAll('.card');
-  if (cardNodes.length < 2) return;
-  const content = document.querySelector('.content');
-  const used = ['topbar','hero','sep','cards','footer']
-    .reduce((s, cls) => { const el = document.querySelector('.'+cls); return s + (el ? el.offsetHeight : 0); }, 0);
-  const free = Math.max(0, content.clientHeight - used);
-  const gap  = Math.min(Math.max(Math.floor(free / (cardNodes.length - 1)) + 5, 5), 30);
-  cardsEl.style.gap = gap + 'px';
+  }
 })();
 </script>
 </body>

@@ -750,9 +750,9 @@ def _build_digest_html(items: list, channel_footer: str = "") -> str:
         link    = item.get("link", "").strip()
         num     = to_persian_num(i + 1)
 
-        # Link is embedded invisibly — user clicks the summary text
+        # Link is on the number only — user clicks "خبر ۱" to open article
         if link and link.startswith("http"):
-            line = f' {emoji} <b>خبر {num}:</b> <a href="{link}">{summary}</a>'
+            line = f' {emoji} <a href="{link}"><b>خبر {num}</b></a>: {summary}'
         else:
             line = f" {emoji} <b>خبر {num}:</b> {summary}"
 
@@ -1695,28 +1695,50 @@ def check_and_handle_on_demand_requests():
 # Main Routine
 # ---------------------------------------------------------------------------
 
-def _send_infographic_photo(chat_id: str, image_path: str) -> None:
+def _send_infographic_photo(chat_id: str, image_path: str, digest_text: str = "") -> None:
     """
-    Uploads a local PNG file to Telegram as a photo using multipart/form-data.
-    This is different from send_telegram_post which accepts a URL.
+    Uploads the infographic PNG to Telegram.
+
+    Logic:
+    - If digest_text (cleaned, no HTML) fits in ≤1000 chars → send as photo caption
+    - If digest_text > 1000 chars → send photo with short caption, then send full text separately
     """
     if not TELEGRAM_BOT_TOKEN:
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    CAPTION_LIMIT = 1000
+
+    # Strip HTML tags to get plain text for caption measurement
+    plain_text = re.sub(r"<[^>]+>", "", digest_text).strip()
+
+    # Build short fallback caption with date and channel
+    date_str      = _jalali_today()
+    channel       = TELEGRAM_CHAT_ID or ""
+    short_caption = f"مهم‌ترین اخبار هوش مصنوعی در ۲۴ ساعت گذشته\n{date_str}\n{channel}".strip()
+
+    if plain_text and len(plain_text) <= CAPTION_LIMIT:
+        # Full text fits as caption
+        caption      = plain_text
+        send_followup = False
+    else:
+        # Too long — use short caption and send text separately
+        caption      = short_caption
+        send_followup = bool(digest_text)
+
+    bot_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
         with open(image_path, "rb") as img_file:
             for attempt in range(1, 4):
                 img_file.seek(0)
                 resp = requests.post(
-                    url,
-                    data={"chat_id": chat_id},
+                    bot_url,
+                    data={"chat_id": chat_id, "caption": caption},
                     files={"photo": ("infographic.png", img_file, "image/png")},
                     timeout=60,
                 )
                 if resp.ok:
                     print(f"[info] Infographic photo sent to {chat_id}")
-                    return
+                    break
                 if resp.status_code == 429:
                     retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
                     print(f"[warn] Rate limited sending infographic, waiting {retry_after}s...")
@@ -1726,6 +1748,12 @@ def _send_infographic_photo(chat_id: str, image_path: str) -> None:
                 return
     except Exception as e:
         print(f"[warn] Could not send infographic photo: {e}")
+        return
+
+    # Send full text as a separate message if caption was too long
+    if send_followup:
+        time.sleep(1)
+        send_telegram_post(chat_id, digest_text, post_type="digest")
 
 def main():
     mode = sys.argv[1].lower() if len(sys.argv) > 1 else "digest"
@@ -1753,35 +1781,29 @@ def main():
 
         digest_text, digest_items = generate_daily_digest(articles)
 
-        # ── 1. Send text digest ──────────────────────────────────────────────
-        if digest_text:
-            for chat in targets:
-                send_telegram_post(chat, digest_text, post_type="digest")
-
-        for chat_id, req_mode in on_demand_requests:
-            if req_mode == "digest" and digest_text:
-                send_telegram_post(chat_id, digest_text, post_type="digest")
-
-        # ── 2. Generate & send infographic image ─────────────────────────────
+        # ── 1. Generate infographic ──────────────────────────────────────────
+        infographic_path = None
         if digest_items:
             print("[info] Generating infographic image...")
             infographic_path = generate_infographic(digest_items)
+            if not infographic_path:
+                print("[warn] Infographic generation failed — will send text only")
 
+        # ── 2. Send: photo+caption if infographic exists, else text only ─────
+        all_targets = list(targets) + [cid for cid, rm in on_demand_requests if rm == "digest"]
+
+        for chat in all_targets:
             if infographic_path and os.path.exists(infographic_path):
-                # Send infographic as a photo to all targets
-                for chat in targets:
-                    _send_infographic_photo(chat, infographic_path)
+                _send_infographic_photo(chat, infographic_path, digest_text)
+            elif digest_text:
+                send_telegram_post(chat, digest_text, post_type="digest")
 
-                for chat_id, _ in on_demand_requests:
-                    _send_infographic_photo(chat_id, infographic_path)
-
-                # Clean up temp file
-                try:
-                    os.remove(infographic_path)
-                except Exception:
-                    pass
-            else:
-                print("[warn] Infographic generation failed — skipping photo post")
+        # ── 3. Clean up infographic temp file ────────────────────────────────
+        if infographic_path and os.path.exists(infographic_path):
+            try:
+                os.remove(infographic_path)
+            except Exception:
+                pass
 
     else:
         # single mode: one rich post (for manual/on-demand use)
