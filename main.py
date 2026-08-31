@@ -1708,21 +1708,23 @@ def _send_infographic_photo(chat_id: str, image_path: str, digest_text: str = ""
 
     CAPTION_LIMIT = 1000
 
-    # Strip HTML tags to get plain text for caption measurement
+    # Strip HTML tags to get plain text length measurement only
     plain_text = re.sub(r"<[^>]+>", "", digest_text).strip()
 
-    # Build short fallback caption with date and channel
+    # Build short fallback caption (plain text — no HTML needed)
     date_str      = _jalali_today()
     channel       = TELEGRAM_CHAT_ID or ""
     short_caption = f"مهم‌ترین اخبار هوش مصنوعی در ۲۴ ساعت گذشته\n{date_str}\n{channel}".strip()
 
     if plain_text and len(plain_text) <= CAPTION_LIMIT:
-        # Full text fits as caption
-        caption      = plain_text
+        # Full HTML text fits as caption — keep links intact
+        caption       = safe_truncate_html(clean_html_for_telegram(digest_text, post_type="digest"), CAPTION_LIMIT)
+        use_html      = True
         send_followup = False
     else:
-        # Too long — use short caption and send text separately
-        caption      = short_caption
+        # Too long — use plain short caption, send full HTML text separately
+        caption       = short_caption
+        use_html      = False
         send_followup = bool(digest_text)
 
     bot_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -1730,9 +1732,12 @@ def _send_infographic_photo(chat_id: str, image_path: str, digest_text: str = ""
         with open(image_path, "rb") as img_file:
             for attempt in range(1, 4):
                 img_file.seek(0)
+                data = {"chat_id": chat_id, "caption": caption}
+                if use_html:
+                    data["parse_mode"] = "HTML"
                 resp = requests.post(
                     bot_url,
-                    data={"chat_id": chat_id, "caption": caption},
+                    data=data,
                     files={"photo": ("infographic.png", img_file, "image/png")},
                     timeout=60,
                 )
