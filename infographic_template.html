@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=1080"/>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Theme variables injected by Python ── */
+{{THEME_VARS}}
+
+html, body {
+  width: 1080px;
+  height: 1920px;
+  font-family: 'Vazirmatn', sans-serif;
+  overflow: hidden;
+  background: var(--bg-base);
+}
+
+.page {
+  width: 1080px;
+  height: 1920px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 60px 68px 56px;
+  background:
+    radial-gradient(ellipse 800px 700px at 110% -5%,  var(--blob-a) 0%, transparent 55%),
+    radial-gradient(ellipse 600px 500px at -10% 110%, var(--blob-b) 0%, transparent 55%),
+    radial-gradient(ellipse 500px 400px at 50%  50%,  var(--blob-c) 0%, transparent 80%),
+    var(--bg-base);
+  overflow: hidden;
+}
+
+/* decorative blobs */
+.blob { position: absolute; border-radius: 50%; filter: blur(80px); pointer-events: none; z-index: 0; }
+.blob-1 { width: 560px; height: 560px; background: radial-gradient(circle, var(--glow-a) 0%, transparent 70%); top: -120px; right: -140px; }
+.blob-2 { width: 420px; height: 420px; background: radial-gradient(circle, var(--glow-b) 0%, transparent 70%); bottom: 180px; left: -100px; }
+.blob-3 { width: 300px; height: 300px; background: radial-gradient(circle, var(--glow-c) 0%, transparent 70%); top: 700px; right: -60px; }
+
+/* dot grid */
+.page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, var(--dot-color) 1px, transparent 1px);
+  background-size: 36px 36px;
+  z-index: 0;
+}
+
+.content { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; justify-content: space-between; }
+
+.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 80px; }
+
+.brand { display: flex; align-items: center; gap: 20px; }
+
+.brand-icon {
+  width: 90px; height: 90px;
+  background: var(--accent-grad);
+  border-radius: 24px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 34px; color: #fff; font-weight: 900;
+  font-family: 'Courier New', monospace;
+  box-shadow: 0 0 24px var(--icon-glow);
+  letter-spacing: -1px;
+}
+
+.brand-name { font-size: 38px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.2px; }
+.brand-name span { color: var(--accent-1); }
+
+.date-pill {
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  border-radius: 50px;
+  padding: 16px 36px;
+  font-size: 30px; font-weight: 500;
+  color: var(--text-muted);
+  backdrop-filter: blur(8px);
+}
+
+/* ── Hero ── */
+.hero { margin-bottom: 60px; }
+
+.live-badge {
+  display: inline-flex; align-items: center; gap: 12px;
+  background: var(--badge-bg);
+  border: 1px solid var(--badge-border);
+  border-radius: 50px;
+  padding: 0px 32px; margin-bottom: 32px;
+  font-size: 26px; font-weight: 600;
+  color: var(--badge-text);
+  letter-spacing: .3px;
+}
+
+.live-dot {
+  width: 14px; height: 14px;
+  background: var(--accent-1);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent-1);
+  flex-shrink: 0;
+}
+
+.hero-title { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 28px; }
+
+.hero-title .line {
+  font-size: 70px; font-weight: 900;
+  color: var(--text-primary);
+  line-height: 1.2; letter-spacing: -2px;
+  white-space: nowrap;
+}
+
+.g1 {
+  background: var(--grad-1);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.g2 {
+  background: var(--grad-2);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+
+.hero-sub {
+  font-size: 28px; color: var(--text-muted);
+  font-weight: 400; line-height: 1.6;
+}
+
+/* ── Separator ── */
+.sep {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--sep-color-a), var(--sep-color-b), transparent);
+  margin-bottom: 38px; position: relative;
+}
+.sep::after {
+  content: ''; position: absolute;
+  left: 50%; top: 0; transform: translateX(-50%);
+  width: 120px; height: 3px;
+  background: var(--grad-1);
+  border-radius: 2px; filter: blur(1px); margin-top: -1px;
+}
+
+/* ── Cards ── */
+.cards { display: flex; flex-direction: column; gap: 28px; }
+
+.card {
+  position: relative; border-radius: 28px;
+  padding: 44px 52px;
+  display: flex; align-items: flex-start; gap: 32px;
+  overflow: hidden;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  backdrop-filter: blur(12px);
+}
+
+/* right glow strip */
+.card::after {
+  content: ''; position: absolute;
+  right: 0; top: 0; bottom: 0; width: 3px;
+  border-radius: 0 22px 22px 0;
+}
+.card:nth-child(1)::after { background: var(--c1); box-shadow: 2px 0 12px var(--c1); }
+.card:nth-child(2)::after { background: var(--c2); box-shadow: 2px 0 12px var(--c2); }
+.card:nth-child(3)::after { background: var(--c3); box-shadow: 2px 0 12px var(--c3); }
+.card:nth-child(4)::after { background: var(--c4); box-shadow: 2px 0 12px var(--c4); }
+.card:nth-child(5)::after { background: var(--c5); box-shadow: 2px 0 12px var(--c5); }
+
+.card:nth-child(1) { border-color: var(--c1-border); }
+.card:nth-child(2) { border-color: var(--c2-border); }
+.card:nth-child(3) { border-color: var(--c3-border); }
+.card:nth-child(4) { border-color: var(--c4-border); }
+.card:nth-child(5) { border-color: var(--c5-border); }
+
+/* inner glow */
+.card::before {
+  content: ''; position: absolute; inset: 0;
+  border-radius: 22px; opacity: .045; pointer-events: none;
+}
+.card:nth-child(1)::before { background: radial-gradient(circle at 80% 50%, var(--c1), transparent 60%); }
+.card:nth-child(2)::before { background: radial-gradient(circle at 80% 50%, var(--c2), transparent 60%); }
+.card:nth-child(3)::before { background: radial-gradient(circle at 80% 50%, var(--c3), transparent 60%); }
+.card:nth-child(4)::before { background: radial-gradient(circle at 80% 50%, var(--c4), transparent 60%); }
+.card:nth-child(5)::before { background: radial-gradient(circle at 80% 50%, var(--c5), transparent 60%); }
+
+/* number badge */
+.card-num {
+  min-width: 80px; height: 80px; border-radius: 22px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px; font-weight: 900; color: #fff;
+  flex-shrink: 0; margin-top: 4px; position: relative; z-index: 1;
+}
+.card:nth-child(1) .card-num { background: linear-gradient(135deg, var(--c1-dark), var(--c1)); box-shadow: 0 4px 18px var(--c1-shadow); }
+.card:nth-child(2) .card-num { background: linear-gradient(135deg, var(--c2-dark), var(--c2)); box-shadow: 0 4px 18px var(--c2-shadow); }
+.card:nth-child(3) .card-num { background: linear-gradient(135deg, var(--c3-dark), var(--c3)); box-shadow: 0 4px 18px var(--c3-shadow); }
+.card:nth-child(4) .card-num { background: linear-gradient(135deg, var(--c4-dark), var(--c4)); box-shadow: 0 4px 18px var(--c4-shadow); }
+.card:nth-child(5) .card-num { background: linear-gradient(135deg, var(--c5-dark), var(--c5)); box-shadow: 0 4px 18px var(--c5-shadow); }
+
+.card-body { flex: 1; position: relative; z-index: 1; }
+
+.card-text {
+  font-size: 12px; font-weight: 500;
+  color: var(--card-text-color);
+  line-height: 1.2;
+  text-align: justify;
+}
+
+/* ── Footer ── */
+.footer {
+  margin-top: 38px; padding-top: 26px;
+  border-top: 1px solid var(--footer-border);
+  display: flex; align-items: center; justify-content: center;
+}
+
+.footer-brand { display: flex; align-items: center; gap: 12px; }
+
+.footer-icon-box {
+  width: 60px; height: 60px;
+  background: var(--accent-grad);
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 900; color: #fff;
+  font-family: 'Courier New', monospace;
+  box-shadow: 0 0 14px var(--icon-glow);
+}
+
+.footer-text { font-size: 34px; font-weight: 700; color: var(--text-footer); }
+.footer-text span { color: var(--accent-1); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+
+  <div class="content">
+    <div class="topbar">
+      <div class="brand">
+        <div class="brand-icon">&lt;/&gt;</div>
+        <div class="brand-name">Mohammad<span>Taghizadeh</span></div>
+      </div>
+      <div class="date-pill">{{DATE}}</div>
+    </div>
+
+    <div class="hero">
+      <div class="live-badge">
+        <!-- <span class="live-dot"></span> -->
+        <!-- اخبار روزانه هوش مصنوعی -->
+      </div>
+      <h1 class="hero-title">
+        <div class="line">مهم‌ترین اخبار <span class="g1">AI</span> در ۱ روز گذشته</div>
+      </h1>
+      <p class="hero-sub">مهم‌ترین رویدادهای امروز دنیای AI، گردآوری‌شده از بیش از ۵۰ منبع معتبر جهانی</p>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="cards">
+      {{CARDS}}
+    </div>
+
+    <div class="footer">
+      <div class="footer-brand">
+        <div class="footer-icon-box">&lt;/&gt;</div>
+        <div class="footer-text">Mohammad<span>Taghizadeh</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function fitAndDistribute() {
+  // 1. fit font size per card
+  const MAX_FONT = 33, MIN_FONT = 22, STEP = 0.5;
+  document.querySelectorAll('.card').forEach(card => {
+    const textEl = card.querySelector('.card-text');
+    if (!textEl) return;
+    let size = MAX_FONT;
+    textEl.style.fontSize = size + 'px';
+    while (size > MIN_FONT && textEl.scrollHeight > textEl.clientHeight + 1) {
+      size -= STEP; textEl.style.fontSize = size + 'px';
+    }
+    while (size < MAX_FONT) {
+      const next = size + STEP;
+      textEl.style.fontSize = next + 'px';
+      if (textEl.scrollHeight > textEl.clientHeight + 1) { textEl.style.fontSize = size + 'px'; break; }
+      size = next;
+    }
+  });
+
+  // 2. distribute remaining space as gap
+  const cardsEl   = document.querySelector('.cards');
+  const cardNodes = cardsEl.querySelectorAll('.card');
+  if (cardNodes.length < 2) return;
+  const content = document.querySelector('.content');
+  const used = ['topbar','hero','sep','cards','footer']
+    .reduce((s, cls) => { const el = document.querySelector('.'+cls); return s + (el ? el.offsetHeight : 0); }, 0);
+  const free = Math.max(0, content.clientHeight - used);
+  const gap  = Math.min(Math.max(Math.floor(free / (cardNodes.length - 1)) + 5, 5), 30);
+  cardsEl.style.gap = gap + 'px';
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+import sys, os
+sys.path.insert(0, r'c:\Users\EA\Desktop\Hooshkav\HooshKav')
+import main
+
+items = [
+    {'link': 'https://openai.com/', 'summary': 'OpenAI مدل GPT-5 را با قابلیت‌های استدلال چندمرحله‌ای پیشرفته معرفی کرد که در بنچمارک‌های اصلی از تمام مدل‌های قبلی پیشی گرفته است.', 'category': 'model'},
+    {'link': 'https://arxiv.org/', 'summary': 'پژوهشگران MIT روش جدیدی برای کاهش توهمات مدل‌های زبانی بزرگ ارائه دادند که دقت واقعی را تا ۴۰٪ بهبود می‌بخشد.', 'category': 'research'},
+    {'link': 'https://huggingface.co/', 'summary': 'Hugging Face یک ابزار ارزیابی خودکار مدل‌های زبانی منتشر کرد که بدون نیاز به دیتاست انسانی کار می‌کند.', 'category': 'tool'},
+    {'link': 'https://techcrunch.com/', 'summary': 'یک استارتاپ هوش مصنوعی در دور سرمایه‌گذاری سری B مبلغ ۱۲۰ میلیون دلار جذب کرد و به یونیکورن تبدیل شد.', 'category': 'business'},
+    {'link': 'https://abc.net.au/', 'summary': 'اتحادیه اروپا قوانین جدید هوش مصنوعی را از اول ژانویه ۲۰۲۷ اجباری اعلام کرد و جریمه‌های سنگینی برای تخلف تعیین شد.', 'category': 'safety'},
+]
+
+base = r'c:\Users\EA\Desktop\Hooshkav\HooshKav'
+
+for theme_name in main.INFOGRAPHIC_THEMES.keys():
+    out = os.path.join(base, f'test_{theme_name}.png')
+    path = main.generate_infographic(items, output_path=out, theme=theme_name)
+    if path:
+        print(f'OK  → {theme_name}: {out}')
+    else:
+        print(f'FAIL → {theme_name}')

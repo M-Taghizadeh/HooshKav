@@ -720,15 +720,15 @@ def _inject_link_in_summary(summary: str, word: str, link: str) -> str:
 
 def _build_digest_html(items: list, channel_footer: str = "") -> str:
     """
-    Builds the final Telegram digest HTML.
+    Builds the final Telegram digest as HTML (parse_mode=HTML).
 
-    Expected output format (matches user-approved sample):
+    Output format — link is hidden inside the summary text (clickable):
 
         مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی
 
-         🎓 خبر ۱: (https://...) خلاصه فارسی خبر ...
+         🎓 خبر ۱: <a href="https://...">خلاصه فارسی خبر ...</a>
 
-         🤖 خبر ۲: (https://...) خلاصه فارسی خبر ...
+         🤖 خبر ۲: <a href="https://...">خلاصه فارسی خبر ...</a>
 
         @channel
     """
@@ -739,22 +739,22 @@ def _build_digest_html(items: list, channel_footer: str = "") -> str:
     def to_persian_num(n: int) -> str:
         return "".join(persian_digits.get(d, d) for d in str(n))
 
-    lines = ["مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی", ""]
+    lines = ["<b>مهم‌ترین‌های ۲۴ ساعت اخیر هوش مصنوعی</b>", ""]
 
     for i, item in enumerate(items):
-        # Pick emoji: LLM may supply a 'category' key, otherwise fall back to list
+        # Pick emoji based on category supplied by LLM
         category = item.get("category", "").lower().strip()
         emoji = CATEGORY_EMOJIS.get(category, DIGEST_EMOJIS[i % len(DIGEST_EMOJIS)])
 
         summary = item.get("summary", "").strip()
         link    = item.get("link", "").strip()
+        num     = to_persian_num(i + 1)
 
-        # Format: " 🎓 خبر ۱: (URL) خلاصه خبر"
-        num = to_persian_num(i + 1)
+        # Link is embedded invisibly — user clicks the summary text
         if link and link.startswith("http"):
-            line = f" {emoji} خبر {num}: ({link}) {summary}"
+            line = f' {emoji} <b>خبر {num}:</b> <a href="{link}">{summary}</a>'
         else:
-            line = f" {emoji} خبر {num}: {summary}"
+            line = f" {emoji} <b>خبر {num}:</b> {summary}"
 
         lines.append(line)
         lines.append("")
@@ -976,8 +976,8 @@ def generate_daily_digest(articles):
 """
 
     raw = generate_llm_text(system_prompt, user_prompt)
-    items = _parse_digest_items(raw, articles)
-    return _build_digest_html(items, channel_footer)
+    items = _parse_digest_items(raw, top_articles)
+    return _build_digest_html(items, channel_footer), items
 
 
 def select_best_article_for_single_post(articles):
@@ -1086,6 +1086,328 @@ def generate_single_rich_post(articles):
 
 
 # ---------------------------------------------------------------------------
+# Step 3b: Infographic Generation (HTML → Playwright screenshot)
+# ---------------------------------------------------------------------------
+
+# ── Themes ──────────────────────────────────────────────────────────────────
+# Each theme defines CSS variable values injected into infographic_template.html
+INFOGRAPHIC_THEMES = {
+    "purple": """
+:root {
+  --bg-base: #0A0818;
+  --blob-a: #3B1FA8; --blob-b: #1A1060; --blob-c: #110D2E;
+  --glow-a: rgba(99,76,255,.28); --glow-b: rgba(139,92,246,.18); --glow-c: rgba(56,189,248,.12);
+  --dot-color: rgba(255,255,255,.06);
+  --accent-grad: linear-gradient(135deg,#6D4FE8,#A78BFA);
+  --icon-glow: rgba(109,79,232,.55);
+  --accent-1: #A78BFA;
+  --text-primary: #F1EFFF; --text-muted: rgba(255,255,255,.42); --text-footer: rgba(255,255,255,.7);
+  --pill-bg: rgba(255,255,255,.07); --pill-border: rgba(255,255,255,.14);
+  --badge-bg: rgba(167,139,250,.12); --badge-border: rgba(167,139,250,.3); --badge-text: #C4B5FD;
+  --grad-1: linear-gradient(90deg,#818CF8,#C084FC,#F472B6);
+  --grad-2: linear-gradient(90deg,#38BDF8,#818CF8);
+  --sep-color-a: rgba(167,139,250,.6); --sep-color-b: rgba(56,189,248,.4);
+  --card-bg: rgba(255,255,255,.045); --card-border: rgba(255,255,255,.09);
+  --card-text-color: rgba(255,255,255,.88);
+  --footer-border: rgba(255,255,255,.08);
+  --c1:#818CF8; --c1-dark:#6366F1; --c1-border:rgba(129,140,248,.25); --c1-shadow:rgba(99,102,241,.5);
+  --c2:#C084FC; --c2-dark:#A855F7; --c2-border:rgba(192,132,252,.22); --c2-shadow:rgba(168,85,247,.5);
+  --c3:#38BDF8; --c3-dark:#0EA5E9; --c3-border:rgba(56,189,248,.22);  --c3-shadow:rgba(14,165,233,.5);
+  --c4:#34D399; --c4-dark:#10B981; --c4-border:rgba(52,211,153,.22);  --c4-shadow:rgba(16,185,129,.5);
+  --c5:#FBBF24; --c5-dark:#F59E0B; --c5-border:rgba(251,191,36,.22);  --c5-shadow:rgba(245,158,11,.5);
+}""",
+
+    "ocean": """
+:root {
+  --bg-base: #040E1A;
+  --blob-a: #0A3060; --blob-b: #062040; --blob-c: #041828;
+  --glow-a: rgba(6,182,212,.25); --glow-b: rgba(14,165,233,.18); --glow-c: rgba(99,102,241,.12);
+  --dot-color: rgba(255,255,255,.05);
+  --accent-grad: linear-gradient(135deg,#0891B2,#38BDF8);
+  --icon-glow: rgba(8,145,178,.55);
+  --accent-1: #38BDF8;
+  --text-primary: #E0F7FF; --text-muted: rgba(224,247,255,.38); --text-footer: rgba(224,247,255,.65);
+  --pill-bg: rgba(56,189,248,.08); --pill-border: rgba(56,189,248,.18);
+  --badge-bg: rgba(6,182,212,.12); --badge-border: rgba(6,182,212,.3); --badge-text: #67E8F9;
+  --grad-1: linear-gradient(90deg,#06B6D4,#38BDF8,#7DD3FC);
+  --grad-2: linear-gradient(90deg,#818CF8,#38BDF8);
+  --sep-color-a: rgba(6,182,212,.6); --sep-color-b: rgba(56,189,248,.4);
+  --card-bg: rgba(6,182,212,.05); --card-border: rgba(56,189,248,.1);
+  --card-text-color: rgba(224,247,255,.88);
+  --footer-border: rgba(56,189,248,.1);
+  --c1:#38BDF8; --c1-dark:#0EA5E9; --c1-border:rgba(56,189,248,.25);  --c1-shadow:rgba(14,165,233,.5);
+  --c2:#06B6D4; --c2-dark:#0891B2; --c2-border:rgba(6,182,212,.22);   --c2-shadow:rgba(8,145,178,.5);
+  --c3:#818CF8; --c3-dark:#6366F1; --c3-border:rgba(129,140,248,.22); --c3-shadow:rgba(99,102,241,.5);
+  --c4:#34D399; --c4-dark:#10B981; --c4-border:rgba(52,211,153,.22);  --c4-shadow:rgba(16,185,129,.5);
+  --c5:#7DD3FC; --c5-dark:#38BDF8; --c5-border:rgba(125,211,252,.22); --c5-shadow:rgba(56,189,248,.5);
+}""",
+
+    "sunset": """
+:root {
+  --bg-base: #0F0804;
+  --blob-a: #7C1D0A; --blob-b: #4A0E1A; --blob-c: #2A0A08;
+  --glow-a: rgba(249,115,22,.25); --glow-b: rgba(239,68,68,.18); --glow-c: rgba(251,191,36,.12);
+  --dot-color: rgba(255,255,255,.05);
+  --accent-grad: linear-gradient(135deg,#EA580C,#FB923C);
+  --icon-glow: rgba(234,88,12,.55);
+  --accent-1: #FB923C;
+  --text-primary: #FFF7ED; --text-muted: rgba(255,247,237,.38); --text-footer: rgba(255,247,237,.65);
+  --pill-bg: rgba(249,115,22,.08); --pill-border: rgba(249,115,22,.18);
+  --badge-bg: rgba(239,68,68,.1); --badge-border: rgba(239,68,68,.28); --badge-text: #FCA5A5;
+  --grad-1: linear-gradient(90deg,#F97316,#FB923C,#FBBF24);
+  --grad-2: linear-gradient(90deg,#EF4444,#F97316);
+  --sep-color-a: rgba(249,115,22,.6); --sep-color-b: rgba(251,191,36,.4);
+  --card-bg: rgba(249,115,22,.05); --card-border: rgba(249,115,22,.1);
+  --card-text-color: rgba(255,247,237,.88);
+  --footer-border: rgba(249,115,22,.1);
+  --c1:#F97316; --c1-dark:#EA580C; --c1-border:rgba(249,115,22,.25);  --c1-shadow:rgba(234,88,12,.5);
+  --c2:#EF4444; --c2-dark:#DC2626; --c2-border:rgba(239,68,68,.22);   --c2-shadow:rgba(220,38,38,.5);
+  --c3:#FBBF24; --c3-dark:#F59E0B; --c3-border:rgba(251,191,36,.22);  --c3-shadow:rgba(245,158,11,.5);
+  --c4:#FB7185; --c4-dark:#F43F5E; --c4-border:rgba(251,113,133,.22); --c4-shadow:rgba(244,63,94,.5);
+  --c5:#FDE68A; --c5-dark:#FCD34D; --c5-border:rgba(253,230,138,.22); --c5-shadow:rgba(252,211,77,.5);
+}""",
+
+    "forest": """
+:root {
+  --bg-base: #050E08;
+  --blob-a: #0A3018; --blob-b: #071F10; --blob-c: #061408;
+  --glow-a: rgba(16,185,129,.22); --glow-b: rgba(5,150,105,.18); --glow-c: rgba(52,211,153,.1);
+  --dot-color: rgba(255,255,255,.05);
+  --accent-grad: linear-gradient(135deg,#059669,#34D399);
+  --icon-glow: rgba(5,150,105,.55);
+  --accent-1: #34D399;
+  --text-primary: #ECFDF5; --text-muted: rgba(236,253,245,.38); --text-footer: rgba(236,253,245,.65);
+  --pill-bg: rgba(16,185,129,.08); --pill-border: rgba(16,185,129,.18);
+  --badge-bg: rgba(5,150,105,.12); --badge-border: rgba(5,150,105,.3); --badge-text: #6EE7B7;
+  --grad-1: linear-gradient(90deg,#10B981,#34D399,#6EE7B7);
+  --grad-2: linear-gradient(90deg,#059669,#10B981);
+  --sep-color-a: rgba(16,185,129,.6); --sep-color-b: rgba(52,211,153,.4);
+  --card-bg: rgba(16,185,129,.05); --card-border: rgba(52,211,153,.1);
+  --card-text-color: rgba(236,253,245,.88);
+  --footer-border: rgba(16,185,129,.1);
+  --c1:#34D399; --c1-dark:#10B981; --c1-border:rgba(52,211,153,.25);  --c1-shadow:rgba(16,185,129,.5);
+  --c2:#10B981; --c2-dark:#059669; --c2-border:rgba(16,185,129,.22);  --c2-shadow:rgba(5,150,105,.5);
+  --c3:#6EE7B7; --c3-dark:#34D399; --c3-border:rgba(110,231,183,.22); --c3-shadow:rgba(52,211,153,.5);
+  --c4:#FBBF24; --c4-dark:#F59E0B; --c4-border:rgba(251,191,36,.22);  --c4-shadow:rgba(245,158,11,.5);
+  --c5:#38BDF8; --c5-dark:#0EA5E9; --c5-border:rgba(56,189,248,.22);  --c5-shadow:rgba(14,165,233,.5);
+}""",
+
+    "midnight": """
+:root {
+  --bg-base: #080808;
+  --blob-a: #1A1A1A; --blob-b: #111111; --blob-c: #0D0D0D;
+  --glow-a: rgba(234,179,8,.18); --glow-b: rgba(161,161,170,.12); --glow-c: rgba(234,179,8,.08);
+  --dot-color: rgba(255,255,255,.04);
+  --accent-grad: linear-gradient(135deg,#A16207,#EAB308);
+  --icon-glow: rgba(234,179,8,.45);
+  --accent-1: #EAB308;
+  --text-primary: #FAFAFA; --text-muted: rgba(250,250,250,.35); --text-footer: rgba(250,250,250,.6);
+  --pill-bg: rgba(255,255,255,.06); --pill-border: rgba(255,255,255,.1);
+  --badge-bg: rgba(234,179,8,.1); --badge-border: rgba(234,179,8,.25); --badge-text: #FDE047;
+  --grad-1: linear-gradient(90deg,#EAB308,#FDE047,#FBBF24);
+  --grad-2: linear-gradient(90deg,#D4D4D8,#FAFAFA);
+  --sep-color-a: rgba(234,179,8,.5); --sep-color-b: rgba(161,161,170,.3);
+  --card-bg: rgba(255,255,255,.04); --card-border: rgba(255,255,255,.07);
+  --card-text-color: rgba(250,250,250,.85);
+  --footer-border: rgba(255,255,255,.07);
+  --c1:#EAB308; --c1-dark:#A16207; --c1-border:rgba(234,179,8,.25);   --c1-shadow:rgba(234,179,8,.5);
+  --c2:#D4D4D8; --c2-dark:#A1A1AA; --c2-border:rgba(212,212,216,.2);  --c2-shadow:rgba(161,161,170,.4);
+  --c3:#FBBF24; --c3-dark:#F59E0B; --c3-border:rgba(251,191,36,.22);  --c3-shadow:rgba(245,158,11,.5);
+  --c4:#F4F4F5; --c4-dark:#D4D4D8; --c4-border:rgba(244,244,245,.15); --c4-shadow:rgba(212,212,216,.4);
+  --c5:#FDE047; --c5-dark:#EAB308; --c5-border:rgba(253,224,71,.2);   --c5-shadow:rgba(234,179,8,.45);
+}""",
+}
+
+# Theme selection by day of week — rotates automatically each day
+_THEME_ROTATION = ["purple", "ocean", "sunset", "forest", "midnight", "ocean", "purple"]
+
+# Persian month names
+_PERSIAN_MONTHS = [
+    "", "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+]
+
+# Persian digits
+_P = {"0":"۰","1":"۱","2":"۲","3":"۳","4":"۴","5":"۵","6":"۶","7":"۷","8":"۸","9":"۹"}
+
+def _to_persian(n: int) -> str:
+    return "".join(_P.get(d, d) for d in str(n))
+
+
+def _jalali_today() -> str:
+    """Returns today's date as a Persian Jalali string, e.g. ۱۱ شهریور ۱۴۰۴"""
+    # Simple Gregorian → Jalali conversion (no external lib needed)
+    g = dt.date.today()
+    gy, gm, gd = g.year, g.month, g.day
+
+    g_days_in_month = [0,31,28,31,30,31,30,31,31,30,31,30,31]
+    if (gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0:
+        g_days_in_month[2] = 29
+
+    jy = gy - 1600
+    gm -= 1
+    gd -= 1
+
+    g_day_no = 365 * jy + (jy + 3) // 4 - (jy + 99) // 100 + (jy + 399) // 400
+    for i in range(gm):
+        g_day_no += g_days_in_month[i + 1]
+    g_day_no += gd
+
+    j_day_no = g_day_no - 79
+
+    j_np = j_day_no // 12053
+    j_day_no %= 12053
+
+    jy = 979 + 33 * j_np + 4 * (j_day_no // 1461)
+    j_day_no %= 1461
+
+    if j_day_no >= 366:
+        jy += (j_day_no - 1) // 365
+        j_day_no = (j_day_no - 1) % 365
+
+    j_days_in_month = [31,31,31,31,31,31,30,30,30,30,30,29]
+    jm = 0
+    for i, days in enumerate(j_days_in_month):
+        if j_day_no < days:
+            jm = i + 1
+            jd = j_day_no + 1
+            break
+        j_day_no -= days
+    else:
+        jm, jd = 12, 29
+
+    return f"{_to_persian(jd)} {_PERSIAN_MONTHS[jm]} {_to_persian(jy)}"
+
+
+# Map category key → Persian label for cards
+_CATEGORY_LABELS = {
+    "model":     "مدل جدید",
+    "research":  "پژوهش",
+    "tool":      "ابزار توسعه",
+    "business":  "کسب‌وکار",
+    "safety":    "امنیت و قانون",
+    "education": "آموزش",
+    "product":   "محصول",
+    "data":      "داده",
+    "hardware":  "سخت‌افزار",
+    "society":   "جامعه",
+    "other":     "هوش مصنوعی",
+}
+
+
+def _build_card_html(items: list) -> str:
+    """Builds the <div class='card'>…</div> blocks for each digest item."""
+    persian_nums = ["۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹", "۱۰"]
+    html_parts = []
+
+    for i, item in enumerate(items):
+        summary  = item.get("summary", "").strip()
+        num      = persian_nums[i] if i < len(persian_nums) else str(i + 1)
+
+        card = f"""
+    <div class="card">
+      <div class="card-num">{num}</div>
+      <div class="card-body">
+        <div class="card-text">{summary}</div>
+      </div>
+    </div>"""
+        html_parts.append(card)
+
+    return "\n".join(html_parts)
+
+
+def generate_infographic(items: list, template_path: str = None, output_path: str = None, theme: str = None) -> str | None:
+    """
+    Renders the infographic HTML template with the given digest items,
+    takes a 1080×1920 screenshot via Playwright, and returns the path
+    to the saved PNG file.
+
+    Args:
+        items:         list of digest item dicts (link, summary, category)
+        template_path: path to infographic_template.html (auto-detected if None)
+        output_path:   where to save the PNG (default: next to main.py)
+        theme:         theme name from INFOGRAPHIC_THEMES (random by weekday if None)
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[warn] playwright not installed — skipping infographic generation")
+        return None
+
+    # Resolve paths
+    if template_path is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        template_path = os.path.join(script_dir, "infographic_template.html")
+
+    if output_path is None:
+        output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooshkav_infographic.png")
+
+    if not os.path.exists(template_path):
+        print(f"[warn] Infographic template not found at {template_path} — skipping")
+        return None
+
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            html = f.read()
+    except Exception as e:
+        print(f"[warn] Could not read infographic template: {e}")
+        return None
+
+    # Inject data into template
+    cards_html = _build_card_html(items)
+    date_str   = _jalali_today()
+
+    # Pick theme: explicit > weekday rotation
+    if theme is None:
+        weekday = dt.date.today().weekday()   # 0=Monday … 6=Sunday
+        theme = _THEME_ROTATION[weekday % len(_THEME_ROTATION)]
+    theme_css = INFOGRAPHIC_THEMES.get(theme, INFOGRAPHIC_THEMES["purple"])
+    print(f"[info] Infographic theme: {theme}")
+
+    html = html.replace("{{THEME_VARS}}", theme_css)
+    html = html.replace("{{DATE}}", date_str)
+    html = html.replace("{{CARDS}}", cards_html)
+
+    # Render with Playwright
+    try:
+        print("[info] Rendering infographic with Playwright...")
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            page = browser.new_page(
+                viewport={"width": 1080, "height": 1920},
+                device_scale_factor=2,
+            )
+
+            # Use data URI so no file:// permission issues on GitHub Actions
+            import base64
+            encoded = base64.b64encode(html.encode("utf-8")).decode("ascii")
+            page.goto(f"data:text/html;base64,{encoded}")
+
+            # Wait for Vazirmatn font to load + JS fit to run
+            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(1200)   # extra buffer for font + JS execution
+
+            page.screenshot(path=output_path, full_page=False, type="png")
+            browser.close()
+
+        # Resize 2x render back to target 1080×1920 for crisp output
+        try:
+            from PIL import Image as _Img
+            img = _Img.open(output_path)
+            img = img.resize((1080, 1920), _Img.LANCZOS)
+            img.save(output_path, "PNG", optimize=True)
+        except ImportError:
+            pass  # Pillow not available — keep 2x image as-is
+
+        print(f"[info] Infographic saved to {output_path}")
+        return output_path
+
+    except Exception as e:
+        print(f"[warn] Infographic rendering failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Step 4: HTML Sanitization Helpers
 # ---------------------------------------------------------------------------
 
@@ -1126,11 +1448,9 @@ def safe_truncate_html(text, max_chars):
 
 def clean_html_for_telegram(text, post_type="digest"):
     """
-    Cleans up LLM text, strips preambles, balances tags, and converts markdown to HTML.
-    post_type: 'digest' or 'single' — controls how preamble stripping works.
-
-    For digest: output is plain text (no HTML), just strip any accidental fences.
-    For single: output is HTML, full cleaning applied.
+    Cleans up LLM/generated text, strips preambles, balances HTML tags.
+    post_type: 'digest' or 'single'
+    Both modes output HTML for Telegram parse_mode=HTML.
     """
     if not text:
         return text
@@ -1141,29 +1461,27 @@ def clean_html_for_telegram(text, post_type="digest"):
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE).strip()
 
     if post_type == "digest":
-        # Digest is plain text — strip any accidental HTML and return as-is
-        # Strip anything before the header line
-        title_match = re.search(r"(مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
+        # Strip anything before the bold header
+        title_match = re.search(r"(<b>\s*مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
         if title_match:
             text = title_match.group(1)
-        # Remove any HTML tags that may have leaked in
-        text = re.sub(r"<[^>]+>", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        return text
+        else:
+            title_match = re.search(r"(مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
+            if title_match:
+                text = title_match.group(1)
+    else:
+        # single: strip English/plain preamble before first emoji or <b>
+        content_match = re.search(
+            r"([🔥🚀🧠📋🛠🔐💸🎬⚡🌐🤖💡🔬📡🏆]|<b>)",
+            text
+        )
+        if content_match:
+            text = text[content_match.start():]
 
-    # --- single post: full HTML cleaning ---
-    # Strip any plain-text or English preamble before the first emoji/bold tag
-    content_match = re.search(
-        r"([🔥🚀🧠📋🛠🔐💸🎬⚡🌐🤖💡🔬📡🏆]|<b>)",
-        text
-    )
-    if content_match:
-        text = text[content_match.start():]
-
-    # Convert markdown links [title](url) to HTML <a href="url">title</a>
+    # Convert markdown links [title](url) → <a href="url">title</a>
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', text)
 
-    # Remove unsupported HTML tags, replace with newlines
+    # Replace unsupported block tags with newlines
     text = re.sub(r"</?(?:p|div|span|ul|ol|li|br|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
@@ -1250,8 +1568,8 @@ def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest"):
 
     cleaned_text = clean_html_for_telegram(html_text, post_type=post_type)
 
-    # Digest is plain text; single is HTML
-    use_html = (post_type == "single")
+    # Both digest and single use HTML parse_mode
+    use_html = True
 
     if image_url and post_type == "single":
         caption = safe_truncate_html(cleaned_text, TELEGRAM_CAPTION_LIMIT)
@@ -1377,6 +1695,38 @@ def check_and_handle_on_demand_requests():
 # Main Routine
 # ---------------------------------------------------------------------------
 
+def _send_infographic_photo(chat_id: str, image_path: str) -> None:
+    """
+    Uploads a local PNG file to Telegram as a photo using multipart/form-data.
+    This is different from send_telegram_post which accepts a URL.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(image_path, "rb") as img_file:
+            for attempt in range(1, 4):
+                img_file.seek(0)
+                resp = requests.post(
+                    url,
+                    data={"chat_id": chat_id},
+                    files={"photo": ("infographic.png", img_file, "image/png")},
+                    timeout=60,
+                )
+                if resp.ok:
+                    print(f"[info] Infographic photo sent to {chat_id}")
+                    return
+                if resp.status_code == 429:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                    print(f"[warn] Rate limited sending infographic, waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue
+                print(f"[warn] sendPhoto (file) failed ({resp.status_code}): {resp.text[:200]}")
+                return
+    except Exception as e:
+        print(f"[warn] Could not send infographic photo: {e}")
+
 def main():
     mode = sys.argv[1].lower() if len(sys.argv) > 1 else "digest"
     print(f"=== Hooshkav AI News Bot (Execution Mode: {mode}) ===")
@@ -1401,8 +1751,9 @@ def main():
     if mode == "digest":
         print("[info] Generating Daily Digest...")
 
-        digest_text = generate_daily_digest(articles)
+        digest_text, digest_items = generate_daily_digest(articles)
 
+        # ── 1. Send text digest ──────────────────────────────────────────────
         if digest_text:
             for chat in targets:
                 send_telegram_post(chat, digest_text, post_type="digest")
@@ -1411,8 +1762,29 @@ def main():
             if req_mode == "digest" and digest_text:
                 send_telegram_post(chat_id, digest_text, post_type="digest")
 
+        # ── 2. Generate & send infographic image ─────────────────────────────
+        if digest_items:
+            print("[info] Generating infographic image...")
+            infographic_path = generate_infographic(digest_items)
+
+            if infographic_path and os.path.exists(infographic_path):
+                # Send infographic as a photo to all targets
+                for chat in targets:
+                    _send_infographic_photo(chat, infographic_path)
+
+                for chat_id, _ in on_demand_requests:
+                    _send_infographic_photo(chat_id, infographic_path)
+
+                # Clean up temp file
+                try:
+                    os.remove(infographic_path)
+                except Exception:
+                    pass
+            else:
+                print("[warn] Infographic generation failed — skipping photo post")
+
     else:
-        # single mode: just one rich post (for manual/on-demand use)
+        # single mode: one rich post (for manual/on-demand use)
         print("[info] Generating Single Rich News Post...")
         post_text, image_url = generate_single_rich_post(articles)
         if post_text:
