@@ -1697,44 +1697,24 @@ def check_and_handle_on_demand_requests():
 
 def _send_infographic_photo(chat_id: str, image_path: str, digest_text: str = "") -> None:
     """
-    Uploads the infographic PNG to Telegram.
-
-    Logic:
-    - If digest_text (cleaned, no HTML) fits in ≤1000 chars → send as photo caption
-    - If digest_text > 1000 chars → send photo with short caption, then send full text separately
+    Uploads the infographic PNG to Telegram, then sends the digest text as a
+    separate follow-up message.  Always two posts: photo first, text second.
     """
     if not TELEGRAM_BOT_TOKEN:
         return
 
-    CAPTION_LIMIT = 1000
-
-    # Strip HTML tags to get plain text length measurement only
-    plain_text = re.sub(r"<[^>]+>", "", digest_text).strip()
-
-    # Build short fallback caption (plain text — no HTML needed)
+    # Build a minimal caption for the photo (date + channel tag only — no news text)
     date_str      = _jalali_today()
     channel       = TELEGRAM_CHAT_ID or ""
     short_caption = f"مهم‌ترین اخبار هوش مصنوعی در ۲۴ ساعت گذشته\n{date_str}\n{channel}".strip()
 
-    if plain_text and len(plain_text) <= CAPTION_LIMIT:
-        # Full HTML text fits as caption — keep links intact
-        caption       = safe_truncate_html(clean_html_for_telegram(digest_text, post_type="digest"), CAPTION_LIMIT)
-        use_html      = True
-        send_followup = False
-    else:
-        # Too long — use plain short caption, send full HTML text separately
-        caption       = short_caption
-        use_html      = False
-        send_followup = bool(digest_text)
-
+    # ── Post 1: infographic photo with short caption ──────────────────────
     bot_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
         with open(image_path, "rb") as img_file:
             for attempt in range(1, 4):
                 img_file.seek(0)
-                data = {"chat_id": chat_id, "caption": caption}
-                if use_html:
-                    data["parse_mode"] = "HTML"
+                data = {"chat_id": chat_id, "caption": short_caption}
                 resp = requests.post(
                     bot_url,
                     data=data,
@@ -1755,8 +1735,8 @@ def _send_infographic_photo(chat_id: str, image_path: str, digest_text: str = ""
         print(f"[warn] Could not send infographic photo: {e}")
         return
 
-    # Send full text as a separate message if caption was too long
-    if send_followup:
+    # ── Post 2: full digest text as a separate message ────────────────────
+    if digest_text:
         time.sleep(1)
         send_telegram_post(chat_id, digest_text, post_type="digest")
 
