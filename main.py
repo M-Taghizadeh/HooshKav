@@ -1712,7 +1712,9 @@ def generate_educational_post(article: dict) -> str:
 <b>چی یاد می‌گیری؟</b>
 ۲–۴ جمله دربارهٔ نکتهٔ اصلی، طوری که واقعاً چیزی یاد بدهد.
 
-<pre>کد پایتون واقعی و خوانا (۶ تا ۱۲ خط)</pre>
+<pre>
+کد پایتون واقعی و خوانا (۶ تا ۱۲ خط) — حتماً داخل همین تگ pre باشد
+</pre>
 
 <i>نکته:</i> یک یا دو خط کاربردی زیر کد.
 
@@ -2113,6 +2115,97 @@ def safe_truncate_html(text, max_chars):
     return truncated.strip()
 
 
+def _escape_telegram_code(text: str) -> str:
+    """Escape &, <, > for Telegram HTML inside <pre>/<code> (idempotent)."""
+    text = (text or "").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _looks_like_code_line(line: str) -> bool:
+    s = line.rstrip()
+    if not s or s.startswith("🧠") or s.startswith("📎") or s.startswith("💬"):
+        return False
+    # Already HTML
+    if re.search(r"</?(?:b|i|a|blockquote|pre|code)\b", s, re.I):
+        return False
+    # Persian-heavy prose → not code
+    persian = sum(1 for c in s if "\u0600" <= c <= "\u06FF")
+    ascii_letters = sum(1 for c in s if c.isascii() and c.isalpha())
+    if persian > 8 and persian >= ascii_letters:
+        return False
+    patterns = (
+        r"^\s*(from |import |def |class |for |if |elif |else:|while |with |try:|except|return |print\(|async |await )",
+        r"^\s*#\s*\S",
+        r"^\s*[a-zA-Z_][\w\.]*\s*=\s*\S",
+        r"^\s*[a-zA-Z_][\w\.]*\([^)]*\)\s*$",
+        r"^\s*\)\s*$",
+        r"^\s*\.\w+",
+    )
+    return any(re.match(p, s) for p in patterns)
+
+
+def _ensure_pre_code_blocks(text: str) -> str:
+    """
+    Make sure educational Python snippets render as Telegram <pre> boxes.
+    - markdown ``` fences → <pre>
+    - bare consecutive code lines without <pre> → wrap
+    - escape contents inside every <pre>
+    - inline `code` → <code>
+    """
+    if not text:
+        return text
+
+    # 1) Markdown fences → <pre>
+    def _fence_to_pre(match):
+        code = (match.group(1) or "").strip("\n")
+        return f"<pre>{_escape_telegram_code(code)}</pre>"
+
+    text = re.sub(r"```(?:[a-zA-Z0-9_+-]*)\s*\n?(.*?)```", _fence_to_pre, text, flags=re.DOTALL)
+
+    # 2) Inline backticks → <code> (skip if already inside tags heavily)
+    def _inline_code(match):
+        return f"<code>{_escape_telegram_code(match.group(1))}</code>"
+
+    text = re.sub(r"`([^`\n]{1,80})`", _inline_code, text)
+
+    # 3) If no <pre> yet, wrap consecutive code-looking lines
+    if "<pre>" not in text.lower():
+        lines = text.split("\n")
+        out = []
+        buf = []
+
+        def flush():
+            nonlocal buf
+            if not buf:
+                return
+            code = "\n".join(buf).strip("\n")
+            if code:
+                out.append(f"<pre>{_escape_telegram_code(code)}</pre>")
+            buf = []
+
+        for line in lines:
+            if _looks_like_code_line(line):
+                buf.append(line.rstrip())
+            else:
+                flush()
+                out.append(line)
+        flush()
+        text = "\n".join(out)
+
+    # 4) Escape every <pre>…</pre> body (also handles LLM-provided pre)
+    def _escape_pre_match(match):
+        return f"<pre>{_escape_telegram_code(match.group(1))}</pre>"
+
+    text = re.sub(r"<pre[^>]*>(.*?)</pre>", _escape_pre_match, text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Same for <code>…</code> that may contain raw <
+    def _escape_code_match(match):
+        return f"<code>{_escape_telegram_code(match.group(1))}</code>"
+
+    text = re.sub(r"<code[^>]*>(.*?)</code>", _escape_code_match, text, flags=re.DOTALL | re.IGNORECASE)
+    return text
+
+
 def clean_html_for_telegram(text, post_type="digest"):
     """
     Cleans up LLM/generated text, strips preambles, balances HTML tags.
@@ -2121,15 +2214,17 @@ def clean_html_for_telegram(text, post_type="digest"):
     if not text:
         return text
 
-    # Convert markdown fenced code blocks to Telegram <pre> before stripping fences
-    def _fence_to_pre(match):
-        code = match.group(2) or ""
-        code = code.strip("\n")
-        # Escape HTML special chars inside code
-        code = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"<pre>{code}</pre>"
-
-    text = re.sub(r"```([a-zA-Z0-9_+-]*)\n(.*?)```", _fence_to_pre, text, flags=re.DOTALL)
+    # Normalize code blocks early (edu critically depends on <pre>)
+    if post_type == "edu":
+        text = _ensure_pre_code_blocks(text)
+    else:
+        # Still convert markdown fences for other modes
+        text = re.sub(
+            r"```(?:[a-zA-Z0-9_+-]*)\s*\n?(.*?)```",
+            lambda m: f"<pre>{_escape_telegram_code((m.group(1) or '').strip(chr(10)))}</pre>",
+            text,
+            flags=re.DOTALL,
+        )
 
     # Strip leftover markdown/html fences
     text = re.sub(r"^```html\s*", "", text, flags=re.MULTILINE)
@@ -2155,18 +2250,21 @@ def clean_html_for_telegram(text, post_type="digest"):
     # Convert markdown links [title](url) → <a href="url">title</a>
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', text)
 
-    # Replace unsupported block tags with newlines (keep pre/code/a/b/i)
-    text = re.sub(r"</?(?:p|div|span|ul|ol|li|br|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
+    # Replace unsupported block tags with newlines (keep pre/code/a/b/i/blockquote).
+    # IMPORTANT: use \b so <pre> is NOT matched as <p>…
+    text = re.sub(r"</?(?:div|span|ul|ol|li|br|h[1-6]|p)\b[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     balanced_lines = []
     inside_pre = False
     for line in text.split("\n"):
-        if "<pre>" in line.lower():
+        lower = line.lower()
+        if "<pre>" in lower:
             inside_pre = True
         if inside_pre:
-            balanced_lines.append(line.rstrip())
-            if "</pre>" in line.lower():
+            # Keep indentation inside code blocks
+            balanced_lines.append(line.rstrip("\r"))
+            if "</pre>" in lower:
                 inside_pre = False
             continue
 
@@ -2302,7 +2400,24 @@ def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest", a
 
     if resp is None or not resp.ok:
         status = resp.status_code if resp is not None else "timeout"
-        print(f"[warn] Telegram sendMessage failed ({status}), retrying as plain text")
+        err_body = ""
+        try:
+            err_body = (resp.text or "")[:300] if resp is not None else ""
+        except Exception:
+            pass
+        print(f"[warn] Telegram sendMessage failed ({status}): {err_body}")
+
+        # Retry once with re-normalized HTML (often fixes broken <pre>/<code>)
+        repaired = clean_html_for_telegram(cleaned_text, post_type=post_type)
+        if use_html and repaired != cleaned_text:
+            payload["text"] = safe_truncate_html(repaired, limit)
+            resp_retry = _telegram_request("sendMessage", payload)
+            if resp_retry is not None and resp_retry.ok:
+                print(f"[info] Text message sent after HTML repair: {chat_id}")
+                return
+
+        # Last resort: plain text (loses code box — logged loudly)
+        print("[warn] Falling back to plain text — code formatting will be lost")
         plain_text = re.sub(r"<[^>]+>", "", cleaned_text)[:TELEGRAM_MESSAGE_LIMIT]
         resp_fallback = _telegram_request("sendMessage", {
             "chat_id": chat_id,
