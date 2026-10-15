@@ -2802,36 +2802,54 @@ def main():
     publish_mode = load_publish_mode()
     print(f"[info] Publish mode: {publish_mode} ({publish_mode_label(publish_mode)})")
 
+    # commands/listen mode: only process Telegram updates (menu, /mode, queued jobs)
+    if mode in ("commands", "listen", "poll"):
+        if on_demand_requests:
+            print(f"[info] On-demand jobs queued: {on_demand_requests}")
+        else:
+            print("[info] No content jobs queued (menu/mode-only updates are fine)")
+        # Fall through to run any queued content jobs below — but do NOT
+        # auto-publish scheduled digest/edu to the channel in this mode.
+
     targets = set()
     if TELEGRAM_CHAT_ID:
         targets.add(TELEGRAM_CHAT_ID)
 
-    # On-demand jobs always run for the requesting admin chat, even if publish mode would skip the channel
-    wants_digest = mode == "digest" or any(rm == "digest" for _, rm in on_demand_requests)
-    wants_edu = mode == "edu" or any(rm == "edu" for _, rm in on_demand_requests)
-    wants_single = mode == "single" or any(rm == "single" for _, rm in on_demand_requests)
+    has_digest_od = any(rm == "digest" for _, rm in on_demand_requests)
+    has_edu_od = any(rm == "edu" for _, rm in on_demand_requests)
+    has_single_od = any(rm == "single" for _, rm in on_demand_requests)
+
+    wants_digest = (mode == "digest") or has_digest_od
+    wants_edu = (mode == "edu") or has_edu_od
+    wants_single = (mode == "single") or has_single_od
 
     if wants_digest:
         channel_ok = mode_allows_job(publish_mode, "digest")
-        digest_targets = set(targets) if (mode == "digest" and channel_ok) else set()
-        # If scheduled digest blocked by publish mode, still serve on-demand digests
+        digest_targets = set()
+        # Channel gets post on schedule OR when admin triggers /digest
+        if channel_ok and (mode == "digest" or has_digest_od):
+            digest_targets |= targets
         if not channel_ok and mode == "digest":
             print(f"[info] Skipping scheduled digest — publish mode is '{publish_mode}'")
-        if digest_targets or any(rm == "digest" for _, rm in on_demand_requests):
+        if digest_targets or has_digest_od:
             _run_digest(digest_targets, on_demand_requests)
-        elif mode == "digest":
-            pass
 
     if wants_edu:
         channel_ok = mode_allows_job(publish_mode, "edu")
-        edu_targets = set(targets) if (mode == "edu" and channel_ok) else set()
+        edu_targets = set()
+        if channel_ok and (mode == "edu" or has_edu_od):
+            edu_targets |= targets
         if not channel_ok and mode == "edu":
             print(f"[info] Skipping scheduled edu — publish mode is '{publish_mode}'")
-        if edu_targets or any(rm == "edu" for _, rm in on_demand_requests):
+        if edu_targets or has_edu_od:
             _run_edu(edu_targets, on_demand_requests, slot=slot)
 
     if wants_single:
-        _run_single(targets if mode == "single" else set(), on_demand_requests)
+        single_targets = set(targets) if (mode == "single" or has_single_od) else set()
+        _run_single(single_targets, on_demand_requests)
+
+    if mode in ("commands", "listen", "poll") and not (wants_digest or wants_edu or wants_single):
+        print("[info] Commands poll finished — replied to menu/mode if any were pending")
 
     print("=== Job Completed Successfully ===")
 

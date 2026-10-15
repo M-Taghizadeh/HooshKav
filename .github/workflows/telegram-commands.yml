@@ -1,0 +1,41 @@
+name: Hooshkav - Telegram Commands Poll
+
+# The bot is not always-online. This job polls Telegram often enough that
+# /start, /menu, /mode and content buttons respond within a few minutes.
+
+on:
+  schedule:
+    # Every 5 minutes
+    - cron: "*/5 * * * *"
+
+  workflow_dispatch:
+
+  repository_dispatch:
+    types: [telegram_commands]
+
+jobs:
+  poll-commands:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests==2.31.0 feedparser==6.0.11
+
+      - name: Poll Telegram commands
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALLOWED_TELEGRAM_USER: ${{ secrets.ALLOWED_TELEGRAM_USER }}
+        run: python main.py commands
