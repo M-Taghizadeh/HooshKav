@@ -1,5 +1,11 @@
 {
-  "date": "",
-  "links": [],
-  "titles": []
+  "date": "2026-10-15",
+  "links": [
+    "https://realpython.com/extract-table-from-pdf-python/",
+    "https://www.kdnuggets.com/few-shot-text-classification-with-scikit-llm"
+  ],
+  "titles": [
+    "Docling vs LlamaParse: How to Extract PDF Tables in Python",
+    "Few-Shot Text Classification with Scikit-LLM"
+  ]
 }
