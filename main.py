@@ -2435,22 +2435,119 @@ def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest", a
 # Step 6: On-Demand Telegram Command Handler
 # ---------------------------------------------------------------------------
 
+BOT_COMMANDS = [
+    {"command": "start", "description": "منوی دستورات"},
+    {"command": "help", "description": "راهنمای دستورات"},
+    {"command": "digest", "description": "ارسال دایجست خبری الان"},
+    {"command": "edu", "description": "ارسال یک آموزش الان"},
+    {"command": "single", "description": "ارسال یک خبر ویژه"},
+    {"command": "mode", "description": "وضعیت / تنظیم حالت انتشار"},
+    {"command": "menu", "description": "نمایش دکمه‌های میانبر"},
+]
+
+ADMIN_REPLY_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📰 دایجست خبری"}, {"text": "🎓 آموزش"}],
+        [{"text": "🔥 خبر ویژه"}, {"text": "⚙️ حالت انتشار"}],
+        [{"text": "📋 راهنما"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+# Map button labels / aliases → job or special action
+_CONTENT_ALIASES = {
+    "/news": "digest", "/digest": "digest", "/latest": "digest",
+    "اخبار": "digest", "خبر": "digest", "📰 دایجست خبری": "digest", "دایجست خبری": "digest",
+    "/single": "single", "پست": "single", "🔥 خبر ویژه": "single", "خبر ویژه": "single",
+    "/edu": "edu", "/lesson": "edu", "آموزش": "edu", "🎓 آموزش": "edu",
+}
+
+_HELP_ALIASES = {"/start", "/help", "/menu", "start", "help", "menu", "📋 راهنما", "راهنما"}
+
+
+def register_bot_commands() -> bool:
+    """Registers slash-commands so Telegram shows them in the bot menu (/)."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands",
+            json={"commands": BOT_COMMANDS},
+            timeout=15,
+        )
+        if resp.ok and resp.json().get("ok"):
+            print("[info] Telegram bot commands registered (menu /)")
+            return True
+        print(f"[warn] setMyCommands failed: {(resp.text or '')[:200]}")
+    except Exception as e:
+        print(f"[warn] Could not register bot commands: {e}")
+    return False
+
+
+def _normalize_command_text(text: str) -> str:
+    """Lowercase, strip @BotName suffix from /cmd@Bot, normalize Arabic chars."""
+    t = (text or "").strip()
+    t = t.replace("ي", "ی").replace("ك", "ک")
+    # /digest@MyBot → /digest
+    if t.startswith("/") and "@" in t.split()[0]:
+        first, *rest = t.split(maxsplit=1)
+        cmd = first.split("@", 1)[0]
+        t = cmd if not rest else f"{cmd} {rest[0]}"
+    return t
+
+
+def _admin_help_html() -> str:
+    current = load_publish_mode()
+    return (
+        "🤖 <b>هوشکاو — منوی دستورات</b>\n\n"
+        "از منوی / پایین چت یا دکمه‌ها استفاده کن:\n\n"
+        "📰 <b>/digest</b> — دایجست خبری الان\n"
+        "🎓 <b>/edu</b> — یک پست آموزشی الان\n"
+        "🔥 <b>/single</b> — یک خبر ویژه\n"
+        "⚙️ <b>/mode</b> — وضعیت حالت انتشار\n"
+        "  <code>/mode news</code> فقط خبر\n"
+        "  <code>/mode both</code> خبر + آموزش\n"
+        "  <code>/mode edu</code> فقط آموزش\n\n"
+        f"حالت فعلی: <b>{publish_mode_label(current)}</b> (<code>{current}</code>)"
+    )
+
+
+def _send_admin_menu(chat_id) -> None:
+    """Sends help text + persistent reply keyboard for quick picking."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    payload = {
+        "chat_id": chat_id,
+        "text": _admin_help_html(),
+        "parse_mode": "HTML",
+        "reply_markup": ADMIN_REPLY_KEYBOARD,
+        "disable_web_page_preview": True,
+    }
+    resp = _telegram_request("sendMessage", payload)
+    if resp is None or not resp.ok:
+        # Fallback without keyboard
+        try:
+            send_telegram_post(chat_id, _admin_help_html())
+        except Exception:
+            pass
+
+
 def _parse_mode_command(text: str):
     """
     Parses admin publish-mode commands.
     Returns ('status', None) | ('set', 'both'|'news'|'edu') | None
     """
-    t = (text or "").strip().lower()
-    t = t.replace("ي", "ی").replace("ك", "ک")
+    t = _normalize_command_text(text).lower()
 
     aliases = {
         "both": "both", "full": "both", "all": "both",
         "خبر و آموزش": "both", "حالت کامل": "both", "کامل": "both",
-        "news": "news", "فقط خبر": "news", "فقط اخبار": "news", "خبر": "news",
-        "edu": "edu", "education": "edu", "فقط آموزش": "edu", "آموزش": "edu",
+        "news": "news", "فقط خبر": "news", "فقط اخبار": "news",
+        "edu": "edu", "education": "edu", "فقط آموزش": "edu",
     }
 
-    if t in ("/mode", "/mode status", "وضعیت", "حالت"):
+    if t in ("/mode", "/mode status", "وضعیت", "حالت", "⚙️ حالت انتشار", "حالت انتشار"):
         return ("status", None)
 
     if t.startswith("/mode"):
@@ -2465,10 +2562,8 @@ def _parse_mode_command(text: str):
             return ("set", mapped)
         return ("status", None)
 
-    if t in aliases and t in ("فقط خبر", "فقط اخبار", "خبر و آموزش", "حالت کامل", "فقط آموزش", "کامل"):
-        # Bare Persian phrases only when clearly mode-related (not bare «آموزش» — that triggers edu post)
-        if t in ("فقط خبر", "فقط اخبار", "خبر و آموزش", "حالت کامل", "فقط آموزش", "کامل"):
-            return ("set", aliases[t])
+    if t in ("فقط خبر", "فقط اخبار", "خبر و آموزش", "حالت کامل", "فقط آموزش", "کامل"):
+        return ("set", aliases[t])
 
     return None
 
@@ -2476,7 +2571,8 @@ def _parse_mode_command(text: str):
 def check_and_handle_on_demand_requests():
     """
     Processes Telegram commands from the authorized admin.
-    - /mode … : updates publish mode immediately and acknowledges
+    - /start /help /menu : show command picker
+    - /mode … : updates publish mode
     - /digest /edu /single : queued as on-demand content jobs
     Returns list of (chat_id, job) where job is digest|edu|single.
     """
@@ -2498,13 +2594,6 @@ def check_and_handle_on_demand_requests():
         on_demand_chats = []
         max_update_id = 0
 
-        content_commands = {
-            "/news": "digest", "/digest": "digest", "/latest": "digest",
-            "/start": "digest", "اخبار": "digest", "خبر": "digest",
-            "/single": "single", "پست": "single",
-            "/edu": "edu", "/lesson": "edu", "آموزش": "edu",
-        }
-
         for update in updates:
             update_id = update.get("update_id", 0)
             if update_id > max_update_id:
@@ -2515,14 +2604,30 @@ def check_and_handle_on_demand_requests():
             username = (sender.get("username") or "").strip().lstrip("@")
             chat_id = msg.get("chat", {}).get("id")
             raw_text = (msg.get("text") or "").strip()
-            text = raw_text.lower()
+            text = _normalize_command_text(raw_text)
+            text_l = text.lower()
 
             if not chat_id or not text:
                 continue
 
             is_admin = username.lower() == ALLOWED_TELEGRAM_USER.lower()
 
-            mode_cmd = _parse_mode_command(raw_text)
+            # Help / menu / start → show picker (do NOT trigger digest)
+            if text_l in {x.lower() for x in _HELP_ALIASES} or text in _HELP_ALIASES:
+                if not is_admin:
+                    try:
+                        send_telegram_post(
+                            chat_id,
+                            f"⛔️ این ربات فقط توسط @{ALLOWED_TELEGRAM_USER} قابل استفاده است.",
+                        )
+                    except Exception:
+                        pass
+                    continue
+                print(f"[info] Showing command menu to @{username}")
+                _send_admin_menu(chat_id)
+                continue
+
+            mode_cmd = _parse_mode_command(text)
             if mode_cmd:
                 if not is_admin:
                     try:
@@ -2538,7 +2643,7 @@ def check_and_handle_on_demand_requests():
                 if action == "set" and value:
                     save_publish_mode(value)
                     reply = (
-                        f"✅ حالت انتشار روی <b>{publish_mode_label(value)}</b> تنظیم شد.\n"
+                        f"✅ حالت انتشار روی <b>{publish_mode_label(value)}</b> تنظیم شد.\n\n"
                         f"<code>/mode news</code> — فقط خبر\n"
                         f"<code>/mode both</code> — خبر + آموزش\n"
                         f"<code>/mode edu</code> — فقط آموزش"
@@ -2552,12 +2657,19 @@ def check_and_handle_on_demand_requests():
                         f"<code>/mode edu</code> — فقط آموزش"
                     )
                 try:
-                    send_telegram_post(chat_id, reply)
+                    # Keep keyboard visible after mode replies
+                    _telegram_request("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": reply,
+                        "parse_mode": "HTML",
+                        "reply_markup": ADMIN_REPLY_KEYBOARD,
+                        "disable_web_page_preview": True,
+                    })
                 except Exception as e:
                     print(f"[warn] Could not reply to /mode: {e}")
                 continue
 
-            job = content_commands.get(text)
+            job = _CONTENT_ALIASES.get(text) or _CONTENT_ALIASES.get(text_l)
             if not job:
                 continue
 
@@ -2682,6 +2794,9 @@ def main():
         slot = int(sys.argv[2])
 
     print(f"=== Hooshkav Bot (mode={mode}, slot={slot}) ===")
+
+    # Ensure slash-command menu is visible in Telegram clients
+    register_bot_commands()
 
     on_demand_requests = check_and_handle_on_demand_requests()
     publish_mode = load_publish_mode()
