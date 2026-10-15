@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>نمونه پست آموزشی جدید — هوشکاو</title>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --bubble: #182533;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #6ab3f3;
+      --quote: #243447;
+      --code-bg: #0d1117;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Vazirmatn", sans-serif;
+      background: radial-gradient(ellipse at top, #1a2740 0%, var(--bg) 55%);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 32px 16px 48px;
+    }
+    .phone {
+      width: min(420px, 100%);
+      background: var(--card);
+      border-radius: 24px;
+      overflow: hidden;
+      box-shadow: 0 24px 80px rgba(0,0,0,.45);
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    .header {
+      padding: 14px 18px;
+      background: #232e3c;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    .avatar {
+      width: 42px; height: 42px; border-radius: 50%;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      display: grid; place-items: center; font-weight: 700;
+    }
+    .header h1 { margin: 0; font-size: 15px; font-weight: 700; }
+    .header p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+    .label {
+      margin: 18px 18px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: .02em;
+    }
+    .photo {
+      margin: 0 18px;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.08);
+      aspect-ratio: 16/9;
+      background: #111;
+    }
+    .photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .caption {
+      margin: 8px 18px 0;
+      padding: 12px 14px;
+      background: var(--bubble);
+      border-radius: 0 14px 14px 14px;
+      font-size: 13.5px;
+      line-height: 1.7;
+    }
+    .msg {
+      margin: 14px 18px 22px;
+      padding: 14px 14px 16px;
+      background: var(--bubble);
+      border-radius: 14px 0 14px 14px;
+      font-size: 14.5px;
+      line-height: 1.85;
+    }
+    .msg b { font-weight: 700; }
+    .msg i { color: #c4d4e8; }
+    blockquote {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border-right: 3px solid var(--accent);
+      background: var(--quote);
+      border-radius: 8px;
+      color: #d5e6f8;
+      font-size: 13.5px;
+    }
+    pre {
+      direction: ltr;
+      text-align: left;
+      background: var(--code-bg);
+      color: #d6e4ff;
+      padding: 12px 14px;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 12.5px;
+      line-height: 1.55;
+      border: 1px solid rgba(255,255,255,.08);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    .note {
+      max-width: 420px;
+      margin: 18px auto 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div>
+    <div class="phone">
+      <div class="header">
+        <div class="avatar">ه</div>
+        <div>
+          <h1>هوشکاو</h1>
+          <p>نمونه استایل پست آموزشی جدید</p>
+        </div>
+      </div>
+
+      <div class="label">۱) تصویر کاور مقاله + کپشن کوتاه</div>
+      <div class="photo">
+        <img src="https://images.unsplash.com/photo-1555949963-aa79dcee981c?auto=format&fit=crop&w=900&q=80" alt="cover" />
+      </div>
+      <div class="caption">
+        🧠 <b>چرا <code>streaming=True</code> تو OpenAI جواب رو نرم‌تر می‌کنه؟</b><br/><br/>
+        📎 <a href="#">Towards Data Science</a><br/><br/>
+        ⬇️ متن کامل آموزش در پیام بعدی
+      </div>
+
+      <div class="label">۲) متن کامل با استایل HTML تلگرام</div>
+      <div class="msg">
+        🧠 <b>چرا streaming تو API مدل‌ها انقدر مهمه؟</b>
+
+        <blockquote>کاربر منتظر «تمام شدن جواب» نمی‌مونه؛ خط‌به‌خط می‌خونه. همین یک تغییر، حس محصولت رو عوض می‌کنه.</blockquote>
+
+        راستش بار اول که بدون stream کد زدم، فکر می‌کردم مدل کنده. بعد فهمیدم مشکل latency کل پاسخ بود، نه خود مدل.
+
+        <b>چی یاد می‌گیری؟</b><br/>
+        با <code>stream=True</code> توکن‌ها همون لحظه میان و می‌تونی UI رو زنده آپدیت کنی — مخصوصاً برای چت‌بات و ابزارهای کدنویسی.
+
+<pre>from openai import OpenAI
+client = OpenAI()
+
+stream = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "RAG یعنی چی؟"}],
+    stream=True,
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content or ""
+    print(delta, end="", flush=True)</pre>
+
+        <i>نکته:</i> تو پروداکشن، هر چانک رو مستقیم به وب‌سوکت/تلگرام بفرست؛ منتظر تمام شدن کل متن نمون.
+
+        📎 <b>منبع:</b> <a href="#">Towards Data Science</a><br/><br/>
+        💬 تو پروژه‌هات از streaming استفاده می‌کنی یا هنوز کل پاسخ رو یکجا می‌گیری؟
+      </div>
+    </div>
+    <p class="note">
+      استراتژی نهایی: آموزش باید مفید باشد (~۲۲۰–۳۵۰ کلمه)، نه کوتاهِ الکی.<br/>
+      با عکس: پیام ۱ کاور+عنوان، پیام ۲ درس کامل استایل‌دار (تا ۴۰۹۶).<br/>
+      بدون عکس: یک پیام متنی + پیش‌نمایش لینک.
+    </p>
+  </div>
+</body>
+</html>

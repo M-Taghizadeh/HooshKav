@@ -132,6 +132,8 @@ TARGET_DIGEST_COUNT = 5
 
 PUBLISH_MODES = ("both", "news", "edu")
 PUBLISH_MODE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "publish_mode.json")
+EDU_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "edu_posted.json")
+EDU_HISTORY_MAX = 200  # keep last N posted edu links to avoid repeats
 
 EDU_TITLE_SIGNALS = [
     "how to", "tutorial", "guide", "explained", "walkthrough", "hands-on",
@@ -480,29 +482,36 @@ def fetch_edu_articles(lookback_hours=None):
     return articles
 
 
-def select_edu_article(articles: list, slot: int = 0):
+def select_edu_article(articles: list, slot: int = 0, exclude_links: set | None = None):
     """
     Picks one educational article for the given daily slot.
+    Skips links already posted to the channel (exclude_links).
     Uses date+slot hashing so noon/evening posts differ and rotate across days.
     """
     if not articles:
         return None
 
-    # Prefer items with educational signal words
+    exclude_links = exclude_links or set()
+
+    # Prefer items with educational signal words, never-posted first
     scored = [(a, _edu_relevance_score(a)) for a in articles]
     scored = [x for x in scored if x[1] > 0] or scored
-    pool = [a for a, _ in scored[:40]]
+    fresh = [a for a, _ in scored if a.get("link") and a["link"] not in exclude_links]
+    pool = fresh[:40] if fresh else []
+
+    if not pool:
+        print("[warn] All educational candidates were already posted")
+        return None
 
     day_key = dt.date.today().isoformat()
     seed = int(hashlib.md5(f"{day_key}:{slot}".encode()).hexdigest(), 16)
-    # Rotate through pool so slot 0 and slot 1 diverge
     idx = (seed + slot * 7) % len(pool)
     chosen = pool[idx]
 
     # Avoid same link for both slots on the same day when possible
     if slot > 0 and len(pool) > 1:
         alt_seed = int(hashlib.md5(f"{day_key}:0".encode()).hexdigest(), 16)
-        first_idx = (alt_seed + 0) % len(pool)
+        first_idx = alt_seed % len(pool)
         if pool[first_idx].get("link") == chosen.get("link"):
             chosen = pool[(idx + 1) % len(pool)]
 
@@ -511,8 +520,35 @@ def select_edu_article(articles: list, slot: int = 0):
 
 
 # ---------------------------------------------------------------------------
-# Publish mode (admin-controlled: both | news | edu)
+# Publish mode + edu history (persisted in repo for GitHub Actions)
 # ---------------------------------------------------------------------------
+
+def _persist_config_via_git(filepath: str, commit_message: str) -> None:
+    """Commit+push a config file when running inside GitHub Actions."""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    try:
+        rel = os.path.relpath(filepath)
+        subprocess.run(["git", "add", rel], check=True, capture_output=True)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if diff.returncode != 0:
+            subprocess.run(
+                [
+                    "git",
+                    "-c", "user.name=hooshkav-bot",
+                    "-c", "user.email=hooshkav-bot@users.noreply.github.com",
+                    "commit", "-m", commit_message,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(["git", "push"], check=True, capture_output=True)
+            print(f"[info] Persisted via git: {rel}")
+        else:
+            print(f"[info] No git change for {rel}")
+    except Exception as e:
+        print(f"[warn] Could not persist {filepath} via git: {e}")
+
 
 def load_publish_mode() -> str:
     try:
@@ -536,32 +572,69 @@ def save_publish_mode(mode: str) -> bool:
         json.dump({"mode": mode}, f, ensure_ascii=False, indent=2)
         f.write("\n")
     print(f"[info] Publish mode saved: {mode}")
-
-    # Persist across GitHub Actions runs by committing the config file
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        try:
-            rel = os.path.relpath(PUBLISH_MODE_FILE)
-            subprocess.run(["git", "add", rel], check=True, capture_output=True)
-            diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
-            if diff.returncode != 0:
-                subprocess.run(
-                    [
-                        "git",
-                        "-c", "user.name=hooshkav-bot",
-                        "-c", "user.email=hooshkav-bot@users.noreply.github.com",
-                        "commit", "-m", f"chore: set publish mode to {mode}",
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
-                subprocess.run(["git", "push"], check=True, capture_output=True)
-                print("[info] Publish mode committed and pushed to repo")
-            else:
-                print("[info] Publish mode unchanged on disk — no commit")
-        except Exception as e:
-            print(f"[warn] Could not persist publish mode via git: {e}")
-
+    _persist_config_via_git(PUBLISH_MODE_FILE, f"chore: set publish mode to {mode}")
     return True
+
+
+def load_edu_posted_links() -> list:
+    """Returns list of previously posted edu article links (most recent last)."""
+    try:
+        with open(EDU_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        items = data.get("posted") or []
+        links = []
+        for item in items:
+            if isinstance(item, str) and item.startswith("http"):
+                links.append(item)
+            elif isinstance(item, dict) and (item.get("link") or "").startswith("http"):
+                links.append(item["link"])
+        return links
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"[warn] Could not read edu history: {e}")
+        return []
+
+
+def mark_edu_as_posted(article: dict) -> None:
+    """Append article link to edu history and persist on Actions."""
+    link = (article.get("link") or "").strip()
+    if not link:
+        return
+
+    posted = load_edu_posted_links()
+    if link in posted:
+        return
+
+    entry = {
+        "link": link,
+        "title": (article.get("title") or "")[:120],
+        "source": article.get("source") or "",
+        "posted_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+    # Rebuild rich history if file already has objects; else upgrade from link list
+    history = []
+    try:
+        with open(EDU_HISTORY_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for item in raw.get("posted") or []:
+            if isinstance(item, dict) and item.get("link"):
+                history.append(item)
+            elif isinstance(item, str) and item.startswith("http"):
+                history.append({"link": item})
+    except Exception:
+        history = [{"link": x} for x in posted]
+
+    history.append(entry)
+    history = history[-EDU_HISTORY_MAX:]
+
+    os.makedirs(os.path.dirname(EDU_HISTORY_FILE), exist_ok=True)
+    with open(EDU_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump({"posted": history}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print(f"[info] Recorded edu post in history ({len(history)} total kept)")
+    _persist_config_via_git(EDU_HISTORY_FILE, "chore: record posted educational article")
 
 
 def publish_mode_label(mode: str) -> str:
@@ -1440,8 +1513,8 @@ def generate_single_rich_post(articles):
 
 def generate_educational_post(article: dict) -> str:
     """
-    Rewrites a real educational article into a human-sounding Persian Telegram post.
-    Always includes a short code sample and a link back to the source.
+    Rewrites a real educational article into a styled, human-sounding Persian
+    Telegram post (HTML). Always includes code + source link.
     """
     channel_footer = TELEGRAM_CHAT_ID if TELEGRAM_CHAT_ID else ""
     article_json = json.dumps({
@@ -1455,42 +1528,66 @@ def generate_educational_post(article: dict) -> str:
         "تو نویسندهٔ یک کانال تلگرام فنی فارسی هستی — نه ربات، نه مترجم رسمی. "
         "مثل یک برنامه‌نویس با‌تجربه حرف می‌زنی که برای دوستش توضیح می‌دهد. "
         "لحنت محاوره‌ای، دقیق و خودمونی است. "
+        "از HTML تلگرام برای استایل استفاده کن تا پست چشم‌نواز باشد. "
         "هرگز شبیه متن تولیدشده با هوش مصنوعی ننویس."
     )
 
     user_prompt = f"""
-از روی این مقاله آموزشی واقعی، یک پست تلگرامی آموزشی به فارسی بنویس.
-محتوا را بازنویسی کن و با زبان خودت توضیح بده — ترجمهٔ لفظ‌به‌لفظ ممنوع.
+از روی این مقاله آموزشی واقعی، یک پست تلگرامی آموزشی شکیل به فارسی بنویس.
+بازنویسی کن با زبان خودت — ترجمهٔ لفظ‌به‌لفظ ممنوع.
 
-ساختار خروجی (دقیقاً HTML تلگرام، بدون ``` و بدون توضیح اضافه):
+طول هدف: حدود ۲۲۰ تا ۳۵۰ کلمه (تقریباً ۱۵۰۰ تا ۲۸۰۰ کاراکتر).
+این پست قرار است در پیام جدا از عکس کاور بیاید، پس جا برای توضیح درست داری — کوتاهِ الکی ننویس، طولانیِ حوصله‌سربر هم نه.
 
-<b>عنوان کوتاه و جذاب فارسی</b>
+ساختار خروجی را دقیقاً رعایت کن (فقط HTML تلگرام، بدون ``` و بدون توضیح اضافه):
 
-پاراگراف ۱ (شروع انسانی؛ مثلاً با یک مشاهده، سوال، یا اشتباه رایج)
+🧠 <b>عنوان کوتاه و جذاب فارسی</b>
 
-پاراگراف ۲–۳ (اصل مطلب؛ جملات کوتاه؛ بدون فهرست شماره‌دار خشک)
+<blockquote>یک جملهٔ کلیدی / insight تند و مفید</blockquote>
 
-<pre>یک تکه کد کوتاه و واقعی پایتون (۵ تا ۱۲ خط) که همان نکته را نشان دهد</pre>
+پاراگراف شروع (۲–۳ جمله؛ انسانی؛ با مشاهده یا اشتباه رایج)
 
-منبع: <a href="{article.get('link', '')}">{article.get('source', 'منبع')}</a>
+<b>چی یاد می‌گیری؟</b>
+۲–۴ جمله دربارهٔ نکتهٔ اصلی، طوری که واقعاً چیزی یاد بدهد.
 
-یک سوال کوتاه در آخر برای دعوت به کامنت
+<pre>کد پایتون واقعی و خوانا (۶ تا ۱۲ خط)</pre>
+
+<i>نکته:</i> یک یا دو خط کاربردی زیر کد.
+
+در صورت نیاز یک پاراگراف کوتاه جمع‌بندی یا دام رایج.
+
+📎 <b>منبع:</b> <a href="{article.get('link', '')}">{article.get('source', 'منبع')}</a>
+
+💬 یک سوال کوتاه برای کامنت
 
 {channel_footer}
 
 قوانین سخت:
-- کل متن فارسی باشد؛ فقط نام کتابخانه/توابع/کد می‌تواند انگلیسی باشد
-- ممنوع: «در این مطلب به بررسی می‌پردازیم»، «نکته مهم این است که»، «در نتیجه می‌توان گفت»، «بیایید بررسی کنیم»، لحن مقاله‌ای
-- ممنوع: ایموجی زیاد (حداکثر یکی در کل پست، آن هم اختیاری)
-- کد داخل <pre> باشد نه markdown
+- از تگ‌های مجاز تلگرام استفاده کن: <b> <i> <u> <code> <pre> <a> <blockquote>
+- کل متن فارسی باشد؛ فقط نام کتابخانه/توابع/کد انگلیسی بماند
+- ممنوع: «در این مطلب به بررسی می‌پردازیم»، «نکته مهم این است که»، «در نتیجه می‌توان گفت»، لحن مقاله‌ای
+- ایموجی فقط در خطوط عنوان/منبع/سوال (حداکثر ۳ تا)
+- کد فقط داخل <pre> باشد
 - لینک منبع را عوض نکن
-- طول کل پست حدود ۲۰۰ تا ۳۵۰ کلمه
+- آموزش باید مفید باشد؛ کیفیت را فدای کوتاهی نکن
 
 اطلاعات مقاله منبع:
 {article_json}
 """
 
     return generate_llm_text(system_prompt, user_prompt)
+
+
+def build_edu_photo_caption(html_text: str, article: dict) -> str:
+    """Short HTML caption for sendPhoto when full post exceeds Telegram caption limit."""
+    title_match = re.search(r"<b>(.*?)</b>", html_text or "", flags=re.DOTALL)
+    title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip() if title_match else (article.get("title") or "آموزش")
+    title = title[:120]
+    source = article.get("source") or "منبع"
+    link = article.get("link") or ""
+    if link:
+        return f"🧠 <b>{title}</b>\n\n📎 <a href=\"{link}\">{source}</a>\n\n⬇️ متن کامل آموزش در پیام بعدی"
+    return f"🧠 <b>{title}</b>\n\n⬇️ متن کامل آموزش در پیام بعدی"
 
 
 # ---------------------------------------------------------------------------
@@ -1980,45 +2077,61 @@ def _telegram_request(method, payload, retries=3):
     return last_resp
 
 
-def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest"):
+def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest", article=None, disable_preview=None):
     """Sends text or photo post to Telegram, with retry and safe truncation.
 
-    Digest posts are plain text (no parse_mode).
-    Single posts use HTML parse_mode.
+    Edu/single posts prefer sendPhoto when image_url is available.
+    Edu without image enables link preview so Telegram shows an article card.
     """
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set.")
 
     cleaned_text = clean_html_for_telegram(html_text, post_type=post_type)
-
-    # Both digest and single use HTML parse_mode
     use_html = True
+    article = article or {}
 
-    if image_url and post_type == "single":
-        caption = safe_truncate_html(cleaned_text, TELEGRAM_CAPTION_LIMIT)
+    if image_url and post_type in ("single", "edu"):
+        # Edu: always 2 messages (cover hook + full lesson). Real tutorials
+        # rarely fit in a 1024-char photo caption without gutting the teaching.
+        if post_type == "edu":
+            caption = build_edu_photo_caption(cleaned_text, article)
+            follow_up = cleaned_text
+        elif len(cleaned_text) <= TELEGRAM_CAPTION_LIMIT:
+            caption = cleaned_text
+            follow_up = None
+        else:
+            caption = safe_truncate_html(cleaned_text, 240)
+            follow_up = cleaned_text
+
         payload = {
             "chat_id": chat_id,
             "photo": image_url,
-            "caption": caption,
+            "caption": safe_truncate_html(caption, TELEGRAM_CAPTION_LIMIT),
+            "parse_mode": "HTML",
         }
-        if use_html:
-            payload["parse_mode"] = "HTML"
         resp = _telegram_request("sendPhoto", payload)
         if resp is not None and resp.ok:
             print(f"[info] Photo message successfully sent to Telegram: {chat_id}")
+            if follow_up:
+                time.sleep(1)
+                send_telegram_post(
+                    chat_id, follow_up, image_url=None, post_type=post_type,
+                    article=article, disable_preview=True,
+                )
             return
-        else:
-            status = resp.status_code if resp is not None else "timeout"
-            print(f"[warn] sendPhoto failed ({status}), falling back to sendMessage")
+        status = resp.status_code if resp is not None else "timeout"
+        print(f"[warn] sendPhoto failed ({status}), falling back to sendMessage")
 
-    # Send as text message
+    # Text message — for edu without image, show link preview card
     limit = TELEGRAM_MESSAGE_LIMIT
     text_body = safe_truncate_html(cleaned_text, limit) if use_html else cleaned_text[:limit]
+    if disable_preview is None:
+        disable_preview = post_type != "edu"
 
     payload = {
         "chat_id": chat_id,
         "text": text_body,
-        "disable_web_page_preview": True,
+        "disable_web_page_preview": disable_preview,
     }
     if use_html:
         payload["parse_mode"] = "HTML"
@@ -2230,19 +2343,44 @@ def _run_edu(targets, on_demand_requests, slot: int = 0):
         print("[warn] Still no educational articles — skipping edu post")
         return
 
-    selected = select_edu_article(articles, slot=slot)
+    already_posted = set(load_edu_posted_links())
+    print(f"[info] Edu history: {len(already_posted)} previously posted links")
+    selected = select_edu_article(articles, slot=slot, exclude_links=already_posted)
     if not selected:
-        print("[warn] Could not select educational article")
+        print("[warn] Could not select educational article (all candidates already posted?)")
         return
+
+    # Pull cover image from the article page for a richer Telegram post
+    if not selected.get("image_url"):
+        print("[info] Fetching og:image for educational article...")
+        selected["image_url"] = fetch_og_image(selected.get("link", ""))
 
     post_text = generate_educational_post(selected)
     if not post_text:
         print("[warn] Empty educational post")
         return
 
+    cleaned_preview = clean_html_for_telegram(post_text, post_type="edu")
+    image_url = selected.get("image_url")
+    if image_url:
+        print(f"[info] Edu post ({len(cleaned_preview)} chars) → cover photo + full lesson (2 messages)")
+    else:
+        print(f"[info] Edu post ({len(cleaned_preview)} chars) → text + link preview (no cover image)")
+
     all_targets = list(targets) + [cid for cid, rm in on_demand_requests if rm == "edu"]
+    sent_ok = False
     for chat in all_targets:
-        send_telegram_post(chat, post_text, post_type="edu")
+        try:
+            send_telegram_post(chat, post_text, image_url=image_url, post_type="edu", article=selected)
+            sent_ok = True
+        except Exception as e:
+            print(f"[warn] Failed sending edu post to {chat}: {e}")
+
+    # Only remember the link after at least one successful channel/admin send
+    if sent_ok:
+        mark_edu_as_posted(selected)
+    else:
+        print("[warn] Edu post not recorded in history — send failed")
 
 
 def _run_single(targets, on_demand_requests):
