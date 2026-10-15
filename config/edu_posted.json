@@ -1,3 +1,10 @@
 {
-  "posted": []
+  "posted": [
+    {
+      "link": "https://realpython.com/extract-table-from-pdf-python/",
+      "title": "Docling vs LlamaParse: How to Extract PDF Tables in Python",
+      "source": "Real Python",
+      "posted_at": "2026-10-15T08:35:29.617135+00:00"
+    }
+  ]
 }
