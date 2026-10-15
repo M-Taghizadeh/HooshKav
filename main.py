@@ -133,7 +133,9 @@ TARGET_DIGEST_COUNT = 5
 PUBLISH_MODES = ("both", "news", "edu")
 PUBLISH_MODE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "publish_mode.json")
 EDU_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "edu_posted.json")
+EDU_DAILY_PICKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "edu_daily_picks.json")
 EDU_HISTORY_MAX = 200  # keep last N posted edu links to avoid repeats
+TARGET_EDU_DAILY = 2   # how many edu posts we plan per day (noon + evening)
 
 EDU_TITLE_SIGNALS = [
     "how to", "tutorial", "guide", "explained", "walkthrough", "hands-on",
@@ -482,40 +484,200 @@ def fetch_edu_articles(lookback_hours=None):
     return articles
 
 
+def _edu_fallback_rank(articles: list, count: int = TARGET_EDU_DAILY) -> list:
+    """Heuristic ranking when LLM selection fails — by educational relevance score."""
+    scored = sorted(articles, key=_edu_relevance_score, reverse=True)
+    return scored[:count]
+
+
+def rank_edu_articles_with_llm(articles: list, count: int = TARGET_EDU_DAILY) -> list:
+    """
+    Like the news digest: send today's educational titles to the LLM and get back
+    the most useful/important tutorials (ordered). Returns article dicts.
+    """
+    if not articles:
+        return []
+
+    # Cap prompt size — keep strongest heuristic candidates
+    scored = sorted(articles, key=_edu_relevance_score, reverse=True)
+    candidates = scored[:30]
+    link_map = {a["link"]: a for a in candidates if a.get("link")}
+
+    compact = []
+    for i, a in enumerate(candidates):
+        compact.append({
+            "index": i,
+            "title": a.get("title", ""),
+            "source": a.get("source", ""),
+            "link": a.get("link", ""),
+            "summary": (a.get("summary") or "")[:180],
+        })
+
+    articles_json = json.dumps(compact, ensure_ascii=False, indent=2)
+
+    system_prompt = (
+        "تو سردبیر یک کانال آموزشی هوش مصنوعی و پایتون هستی. "
+        "باید مفیدترین آموزش‌های روز را برای برنامه‌نویس‌های فارسی‌زبان انتخاب کنی."
+    )
+
+    user_prompt = f"""
+از بین مقالات آموزشی زیر، دقیقاً {count} مورد را به ترتیب اهمیت انتخاب کن.
+
+معیار اولویت:
+۱. کاربردی بودن برای برنامه‌نویس (کد، ابزار، تکنیک قابل‌اجرا)
+۲. تازگی و مرتبط بودن با LLM / پایتون / AI engineering
+۳. عمق آموزشی (tutorial/guide بهتر از خبر یا اعلام محصول صرف)
+۴. تنوع موضوع بین انتخاب‌ها
+
+خروجی فقط JSON معتبر (بدون ```):
+{{
+  "items": [
+    {{"link": "لینک دقیق از ورودی", "reason": "یک جمله کوتاه فارسی چرا این مهم است"}}
+  ]
+}}
+
+قوانین:
+- دقیقاً {count} آیتم
+- link را عیناً از ورودی کپی کن
+- مرتب از مهم‌ترین به بعدی
+
+مقالات:
+{articles_json}
+"""
+
+    try:
+        raw = generate_llm_text(system_prompt, user_prompt)
+        data = _extract_json_from_llm(raw)
+    except Exception as e:
+        print(f"[warn] Edu LLM ranking failed: {e} — using heuristic fallback")
+        return _edu_fallback_rank(candidates, count)
+
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        print("[warn] Edu LLM ranking parse failed — using heuristic fallback")
+        return _edu_fallback_rank(candidates, count)
+
+    picked = []
+    seen = set()
+    for item in data["items"]:
+        if not isinstance(item, dict):
+            continue
+        link = (item.get("link") or "").strip()
+        if not link or link not in link_map or link in seen:
+            continue
+        article = dict(link_map[link])
+        article["pick_reason"] = (item.get("reason") or "").strip()
+        picked.append(article)
+        seen.add(link)
+        if len(picked) >= count:
+            break
+
+    if len(picked) < count:
+        for a in _edu_fallback_rank(candidates, count + 5):
+            link = a.get("link")
+            if not link or link in seen:
+                continue
+            picked.append(a)
+            seen.add(link)
+            if len(picked) >= count:
+                break
+
+    print(f"[info] Edu LLM ranked {len(picked)} articles for today")
+    for i, a in enumerate(picked):
+        reason = a.get("pick_reason") or ""
+        print(f"      #{i + 1}: {a.get('title', '')[:70]}" + (f" — {reason}" if reason else ""))
+    return picked[:count]
+
+
+def load_edu_daily_picks() -> dict:
+    """Loads today's cached LLM edu picks: {date, links: [...]}."""
+    try:
+        with open(EDU_DAILY_PICKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[warn] Could not read edu daily picks: {e}")
+    return {}
+
+
+def save_edu_daily_picks(links: list, titles: list | None = None) -> None:
+    today = dt.date.today().isoformat()
+    payload = {
+        "date": today,
+        "links": links,
+        "titles": titles or [],
+    }
+    os.makedirs(os.path.dirname(EDU_DAILY_PICKS_FILE), exist_ok=True)
+    with open(EDU_DAILY_PICKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print(f"[info] Saved {len(links)} edu daily picks for {today}")
+    _persist_config_via_git(EDU_DAILY_PICKS_FILE, f"chore: edu daily picks for {today}")
+
+
 def select_edu_article(articles: list, slot: int = 0, exclude_links: set | None = None):
     """
-    Picks one educational article for the given daily slot.
-    Skips links already posted to the channel (exclude_links).
-    Uses date+slot hashing so noon/evening posts differ and rotate across days.
+    News-style selection for educational posts:
+    1) Rank today's fresh tutorials with the LLM (once per day, cached)
+    2) Slot 0 → #1 most important, slot 1 → #2, etc.
+    Already-posted links are skipped.
     """
     if not articles:
         return None
 
     exclude_links = exclude_links or set()
-
-    # Prefer items with educational signal words, never-posted first
-    scored = [(a, _edu_relevance_score(a)) for a in articles]
-    scored = [x for x in scored if x[1] > 0] or scored
-    fresh = [a for a, _ in scored if a.get("link") and a["link"] not in exclude_links]
-    pool = fresh[:40] if fresh else []
-
-    if not pool:
+    fresh = [a for a in articles if a.get("link") and a["link"] not in exclude_links]
+    if not fresh:
         print("[warn] All educational candidates were already posted")
         return None
 
-    day_key = dt.date.today().isoformat()
-    seed = int(hashlib.md5(f"{day_key}:{slot}".encode()).hexdigest(), 16)
-    idx = (seed + slot * 7) % len(pool)
-    chosen = pool[idx]
+    today = dt.date.today().isoformat()
+    link_map = {a["link"]: a for a in fresh}
+    cached = load_edu_daily_picks()
 
-    # Avoid same link for both slots on the same day when possible
-    if slot > 0 and len(pool) > 1:
-        alt_seed = int(hashlib.md5(f"{day_key}:0".encode()).hexdigest(), 16)
-        first_idx = alt_seed % len(pool)
-        if pool[first_idx].get("link") == chosen.get("link"):
-            chosen = pool[(idx + 1) % len(pool)]
+    ranked_links = []
+    if cached.get("date") == today and isinstance(cached.get("links"), list) and cached["links"]:
+        ranked_links = [l for l in cached["links"] if isinstance(l, str)]
+        print(f"[info] Using cached edu daily picks ({len(ranked_links)} links)")
+    else:
+        ranked = rank_edu_articles_with_llm(fresh, count=TARGET_EDU_DAILY)
+        ranked_links = [a["link"] for a in ranked if a.get("link")]
+        if ranked_links:
+            save_edu_daily_picks(
+                ranked_links,
+                titles=[a.get("title", "") for a in ranked],
+            )
 
-    print(f"[info] Edu slot {slot} selected: {chosen.get('title', '')[:80]}")
+    # Prefer cached/ranked order; fall back to heuristic among leftover fresh articles
+    ordered = []
+    seen = set()
+    for link in ranked_links:
+        if link in link_map and link not in exclude_links and link not in seen:
+            ordered.append(link_map[link])
+            seen.add(link)
+
+    if len(ordered) <= slot:
+        for a in _edu_fallback_rank(fresh, count=TARGET_EDU_DAILY + 5):
+            link = a.get("link")
+            if not link or link in seen or link in exclude_links:
+                continue
+            ordered.append(a)
+            seen.add(link)
+
+    if not ordered:
+        return None
+
+    # If this slot's pick is gone, take the next available ranked item
+    idx = min(slot, len(ordered) - 1)
+    # Prefer exact slot index when available and not already used today via history
+    if slot < len(ordered):
+        chosen = ordered[slot]
+    else:
+        chosen = ordered[idx]
+
+    print(f"[info] Edu slot {slot} selected (importance rank): {chosen.get('title', '')[:80]}")
     return chosen
 
 
