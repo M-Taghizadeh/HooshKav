@@ -1,0 +1,60 @@
+name: Hooshkav - Educational Posts
+
+on:
+  schedule:
+    # ~12:00 Iran winter (IRST=UTC+3:30)
+    - cron: "30 8 * * *"
+    # ~18:00 Iran winter (IRST=UTC+3:30)
+    - cron: "30 14 * * *"
+
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: "Edu slot (0=noon, 1=evening)"
+        required: false
+        default: "0"
+
+  repository_dispatch:
+    types: [generate_edu]
+
+jobs:
+  send-edu:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests==2.31.0 feedparser==6.0.11
+
+      - name: Resolve edu slot
+        id: slot
+        run: |
+          if [ -n "${{ github.event.inputs.slot }}" ]; then
+            echo "value=${{ github.event.inputs.slot }}" >> "$GITHUB_OUTPUT"
+          else
+            HOUR=$(date -u +%H)
+            # Before 12 UTC → slot 0 (noon Iran); otherwise slot 1 (evening)
+            if [ "$HOUR" -lt 12 ]; then
+              echo "value=0" >> "$GITHUB_OUTPUT"
+            else
+              echo "value=1" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Run educational bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALLOWED_TELEGRAM_USER: ${{ secrets.ALLOWED_TELEGRAM_USER }}
+        run: python main.py edu ${{ steps.slot.outputs.value }}

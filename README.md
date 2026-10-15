@@ -89,21 +89,21 @@ An automated, fully free system that collects the most important AI news from 50
 └─────────────────────────────────────────────────────────────────────┘
 
 Daily Output:
-  08:00 Iran → 1 digest post (10 headlines with source links)
+  08:00 Iran → digest (5 Persian headlines, text only)
+  12:00 Iran → educational post (from Medium / Kaggle / TDS / …)
+  18:00 Iran → educational post
 ```
 
 ---
 
 ## Key Features
 
-- **50 AI-specific RSS feeds** — all scoped to AI/ML: lab blogs (OpenAI, DeepMind, Anthropic, Meta AI, Mistral), research (ArXiv cs.AI/LG/CL, Papers With Code), news (TechCrunch AI, The Verge AI, MIT Tech Review, Wired AI), newsletters (Import AI, TLDR AI, Last Week in AI), and more.
-- **Semantic deduplication** — TF-IDF cosine similarity clusters near-duplicate titles across sources; `mention_count` tracks how many outlets covered the same story.
-- **mention_count signal** — stories covered by more sources rank higher in the LLM prompt, producing more reliable importance scoring.
-- **Strict time window** — digest covers the last 24 hours of AI news.
-- **Multi-provider LLM fallback** — Gemini → Groq (Llama 3.3 70B) → OpenRouter; all free tiers.
-- **Safe HTML output** — balanced tags, safe truncation, markdown-to-HTML conversion, Telegram parse mode compatibility.
-- **Telegram retry** — handles rate limits (429) with exponential backoff.
-- **On-demand command** — authorized user (`ALLOWED_TELEGRAM_USER`) can trigger `/digest` from Telegram at any time.
+- **50 AI-specific RSS feeds** — AI/ML news for the morning digest.
+- **Educational feeds** — Medium, Towards Data Science, Kaggle Blog, Real Python, Hugging Face, and tutorial-focused Google News — rewritten into human Persian posts.
+- **Admin publish mode** — `/mode news` | `/mode both` | `/mode edu` toggles what scheduled jobs send (`config/publish_mode.json`).
+- **Semantic deduplication** — TF-IDF clustering + `mention_count` for digest ranking.
+- **Multi-provider LLM fallback** — Gemini → Groq → OpenRouter.
+- **On-demand commands** — `/digest`, `/edu`, `/single`, `/mode` for `ALLOWED_TELEGRAM_USER`.
 
 ---
 
@@ -151,12 +151,26 @@ cp .env.example .env
 # Preview digest output in terminal (no Telegram send)
 python test_send.py digest
 
-# Run the full bot (sends to Telegram)
+# Morning news digest
 python main.py digest
+
+# Educational post (slot 0 = noon, 1 = evening)
+python main.py edu 0
 
 # Run tests
 python -m pytest test_hooshkav.py -v
 ```
+
+Admin Telegram commands:
+
+| Command | Effect |
+|:---|:---|
+| `/mode` | Show current publish mode |
+| `/mode news` | Scheduled jobs: news only |
+| `/mode both` | News + education (default) |
+| `/mode edu` | Education only |
+| `/digest` | Send digest now |
+| `/edu` | Send one educational post now |
 
 ---
 
@@ -164,12 +178,13 @@ python -m pytest test_hooshkav.py -v
 
 | Variable | Default | Description |
 |:---|:---|:---|
-| `TARGET_DIGEST_COUNT` | `10` | Number of headlines in the daily digest |
+| `TARGET_DIGEST_COUNT` | `5` | Number of headlines in the daily digest |
 | `LOOKBACK_HOURS` | `24` | Time window for the daily digest |
+| `LOOKBACK_HOURS_EDU` | `72` | Time window for educational sources |
 | `MAX_PER_FEED` | `5` | Max articles per RSS feed |
-| `MAX_PER_DYNAMIC_FEED` | `10` | Max articles per Google News feed |
-| `RSS_FEEDS` | 50 entries | List of AI-specific RSS feeds |
-| `DYNAMIC_SEARCH_FEEDS` | 6 entries | Google News dynamic search feeds |
+| `RSS_FEEDS` | 50 entries | News RSS feeds |
+| `EDU_RSS_FEEDS` | tutorial feeds | Educational RSS feeds |
+| `config/publish_mode.json` | `both` | Admin-controlled publish mode |
 
 ---
 
@@ -177,4 +192,6 @@ python -m pytest test_hooshkav.py -v
 
 | UTC | Iran Winter (IRST +3:30) | Iran Summer (IRDT +4:30) | Mode |
 |:---|:---|:---|:---|
-| 04:30 | 08:00 | 09:00 | digest (10 headlines) |
+| 04:30 | 08:00 | 09:00 | digest (5 headlines) |
+| 08:30 | 12:00 | 13:00 | educational post |
+| 14:30 | 18:00 | 19:00 | educational post |

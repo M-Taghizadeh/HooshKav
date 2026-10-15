@@ -1,13 +1,12 @@
 """
-Hooshkav (هوشکاو) — Daily & Single Rich AI News Telegram Bot
+Hooshkav (هوشکاو) — AI News + Educational Telegram Bot
 
 Features:
-1. Massive RSS Coverage (50 AI-specific sources: TechCrunch, Verge, VentureBeat, MIT, Wired, OpenAI, DeepMind, Anthropic, ArXiv, Hugging Face, etc.).
-2. Zero Quota Issues: Efficient generation without heavy search grounding quota usage.
-3. Multi-Provider Fallback (Gemini API -> Groq API -> OpenRouter API).
-4. Mode 1 (Digest): 10 top daily news summary post.
-5. Mode 2 (Single Rich Post): Detailed breaking news post with Image, Catchy Persian Title, Full Explanation, and Source Link.
-6. On-Demand Telegram control for user 'tqzdh' (/digest, /single, /news).
+1. Morning digest: top AI news in Persian (text only).
+2. Daytime educational posts from real tutorial sources (Medium, Kaggle, TDS, …).
+3. Multi-Provider Fallback (Gemini -> Groq -> OpenRouter).
+4. Admin publish-mode control via Telegram (/mode news|both|edu).
+5. On-demand commands: /digest, /edu, /single, /mode.
 """
 
 import os
@@ -16,6 +15,8 @@ import json
 import re
 import time
 import math
+import hashlib
+import subprocess
 import datetime as dt
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -103,11 +104,47 @@ DYNAMIC_SEARCH_FEEDS = [
     ("Google News: AI Research",        "https://news.google.com/rss/search?q=AI+research+OR+machine+learning+breakthrough+when:2d&hl=en-US&gl=US&ceid=US:en"),
 ]
 
+# Educational / tutorial sources for daytime posts (separate from news digest)
+EDU_RSS_FEEDS = [
+    ("Towards Data Science", "https://towardsdatascience.com/feed"),
+    ("Medium: Artificial Intelligence", "https://medium.com/feed/tag/artificial-intelligence"),
+    ("Medium: Machine Learning", "https://medium.com/feed/tag/machine-learning"),
+    ("Medium: Python", "https://medium.com/feed/tag/python"),
+    ("Medium: Large Language Models", "https://medium.com/feed/tag/large-language-models"),
+    ("Medium: LangChain", "https://medium.com/feed/tag/langchain"),
+    ("Kaggle Blog", "https://medium.com/feed/kaggle-blog"),
+    ("Hugging Face Blog", "https://huggingface.co/blog/feed.xml"),
+    ("Real Python", "https://realpython.com/atom.xml"),
+    ("KDnuggets", "https://www.kdnuggets.com/feed"),
+    ("Analytics Vidhya", "https://www.analyticsvidhya.com/feed/"),
+    ("PyImageSearch", "https://pyimagesearch.com/feed/"),
+    ("Google News: AI Tutorials", "https://news.google.com/rss/search?q=AI+OR+LLM+OR+Python+(tutorial+OR+guide+OR+%22how+to%22)+when:7d&hl=en-US&gl=US&ceid=US:en"),
+    ("Google News: ScienceDirect ML", "https://news.google.com/rss/search?q=site:sciencedirect.com+(machine+learning+OR+deep+learning+OR+LLM)+when:30d&hl=en-US&gl=US&ceid=US:en"),
+]
+
 LOOKBACK_HOURS = 24        # strict 24-hour window for digest mode
 LOOKBACK_HOURS_SINGLE = 8  # single posts only cover last 8 hours (fresh news only)
+LOOKBACK_HOURS_EDU = 72    # educational content ages slower
 MAX_PER_FEED = 5
 MAX_PER_DYNAMIC_FEED = 10
+MAX_PER_EDU_FEED = 6
 TARGET_DIGEST_COUNT = 5
+
+PUBLISH_MODES = ("both", "news", "edu")
+PUBLISH_MODE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "publish_mode.json")
+
+EDU_TITLE_SIGNALS = [
+    "how to", "tutorial", "guide", "explained", "walkthrough", "hands-on",
+    "with python", "in python", "for beginners", "step by step", "step-by-step",
+    "intro to", "introduction", "deep dive", "build a", "building", "learn",
+    "rag", "fine-tun", "prompt", "langchain", "llamaindex", "transformers",
+    "openai", "ollama", "fastapi", "pytorch", "tensorflow", "scikit",
+    "pandas", "numpy", "jupyter", "dataset", "notebook", "llm", "embedding",
+]
+EDU_TITLE_BLOCKLIST = [
+    "raises $", "funding", "acquires", "acquisition", "ipo", "layoffs",
+    "stock", "shares surge", "lawsuit", "sues ",
+]
 
 # Telegram caption hard limit (in characters)
 TELEGRAM_CAPTION_LIMIT = 1024
@@ -350,6 +387,200 @@ def fetch_recent_articles(lookback_hours=None):
         print(f"[info] Articles with image after og:image fetch: {with_image}/{len(interleaved)}")
 
     return interleaved
+
+
+def _is_edu_candidate(title: str) -> bool:
+    """Heuristic: prefer tutorial/how-to titles, drop corporate news."""
+    t = (title or "").lower()
+    if any(b in t for b in EDU_TITLE_BLOCKLIST):
+        return False
+    # Always keep known educational publishers even without signal words
+    return True
+
+
+def _edu_relevance_score(article: dict) -> float:
+    title = (article.get("title") or "").lower()
+    summary = (article.get("summary") or "").lower()
+    blob = f"{title} {summary}"
+    score = 0.0
+    for sig in EDU_TITLE_SIGNALS:
+        if sig in blob:
+            score += 1.5
+    source = (article.get("source") or "").lower()
+    if any(k in source for k in ("towards", "kaggle", "real python", "medium", "kdnuggets", "huggingface", "analytics")):
+        score += 2.0
+    if any(b in title for b in EDU_TITLE_BLOCKLIST):
+        score -= 5.0
+    return score
+
+
+def fetch_edu_articles(lookback_hours=None):
+    """
+    Fetches educational/tutorial articles from EDU_RSS_FEEDS.
+    Allows undated entries (common on Medium) within per-feed cap.
+    """
+    if lookback_hours is None:
+        lookback_hours = LOOKBACK_HOURS_EDU
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=lookback_hours)
+    articles = []
+    seen_links = set()
+
+    for source_name, feed_url in EDU_RSS_FEEDS:
+        try:
+            parsed = feedparser.parse(feed_url)
+        except Exception as e:
+            print(f"[warn] edu feed failed {source_name}: {e}")
+            continue
+
+        count = 0
+        for entry in parsed.entries:
+            if count >= MAX_PER_EDU_FEED:
+                break
+
+            link = getattr(entry, "link", "").strip()
+            if not link or link in seen_links:
+                continue
+
+            direct_link = extract_direct_link(entry, feed_url)
+            if not direct_link or direct_link in seen_links:
+                continue
+
+            published = None
+            for key in ("published_parsed", "updated_parsed"):
+                if getattr(entry, key, None):
+                    try:
+                        published = dt.datetime(*entry[key][:6], tzinfo=dt.timezone.utc)
+                    except Exception:
+                        pass
+                    break
+
+            if published and published < cutoff:
+                continue
+
+            title = getattr(entry, "title", "").strip()
+            if not title or not _is_edu_candidate(title):
+                continue
+
+            summary = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+            summary_clean = re.sub(r"<[^>]+>", "", summary)[:500].strip()
+
+            seen_links.add(link)
+            seen_links.add(direct_link)
+            articles.append({
+                "source": source_name,
+                "title": title,
+                "link": direct_link,
+                "summary": summary_clean,
+                "published": published.isoformat() if published else None,
+            })
+            count += 1
+
+    articles.sort(key=_edu_relevance_score, reverse=True)
+    print(f"[info] Collected {len(articles)} educational candidates from {len(EDU_RSS_FEEDS)} edu feeds")
+    return articles
+
+
+def select_edu_article(articles: list, slot: int = 0):
+    """
+    Picks one educational article for the given daily slot.
+    Uses date+slot hashing so noon/evening posts differ and rotate across days.
+    """
+    if not articles:
+        return None
+
+    # Prefer items with educational signal words
+    scored = [(a, _edu_relevance_score(a)) for a in articles]
+    scored = [x for x in scored if x[1] > 0] or scored
+    pool = [a for a, _ in scored[:40]]
+
+    day_key = dt.date.today().isoformat()
+    seed = int(hashlib.md5(f"{day_key}:{slot}".encode()).hexdigest(), 16)
+    # Rotate through pool so slot 0 and slot 1 diverge
+    idx = (seed + slot * 7) % len(pool)
+    chosen = pool[idx]
+
+    # Avoid same link for both slots on the same day when possible
+    if slot > 0 and len(pool) > 1:
+        alt_seed = int(hashlib.md5(f"{day_key}:0".encode()).hexdigest(), 16)
+        first_idx = (alt_seed + 0) % len(pool)
+        if pool[first_idx].get("link") == chosen.get("link"):
+            chosen = pool[(idx + 1) % len(pool)]
+
+    print(f"[info] Edu slot {slot} selected: {chosen.get('title', '')[:80]}")
+    return chosen
+
+
+# ---------------------------------------------------------------------------
+# Publish mode (admin-controlled: both | news | edu)
+# ---------------------------------------------------------------------------
+
+def load_publish_mode() -> str:
+    try:
+        with open(PUBLISH_MODE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        mode = (data.get("mode") or "both").strip().lower()
+        if mode in PUBLISH_MODES:
+            return mode
+    except Exception as e:
+        print(f"[warn] Could not read publish mode file: {e}")
+    return "both"
+
+
+def save_publish_mode(mode: str) -> bool:
+    mode = (mode or "").strip().lower()
+    if mode not in PUBLISH_MODES:
+        return False
+
+    os.makedirs(os.path.dirname(PUBLISH_MODE_FILE), exist_ok=True)
+    with open(PUBLISH_MODE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"mode": mode}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print(f"[info] Publish mode saved: {mode}")
+
+    # Persist across GitHub Actions runs by committing the config file
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        try:
+            rel = os.path.relpath(PUBLISH_MODE_FILE)
+            subprocess.run(["git", "add", rel], check=True, capture_output=True)
+            diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
+            if diff.returncode != 0:
+                subprocess.run(
+                    [
+                        "git",
+                        "-c", "user.name=hooshkav-bot",
+                        "-c", "user.email=hooshkav-bot@users.noreply.github.com",
+                        "commit", "-m", f"chore: set publish mode to {mode}",
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(["git", "push"], check=True, capture_output=True)
+                print("[info] Publish mode committed and pushed to repo")
+            else:
+                print("[info] Publish mode unchanged on disk — no commit")
+        except Exception as e:
+            print(f"[warn] Could not persist publish mode via git: {e}")
+
+    return True
+
+
+def publish_mode_label(mode: str) -> str:
+    return {
+        "both": "خبر + آموزش",
+        "news": "فقط خبر",
+        "edu": "فقط آموزش",
+    }.get(mode, mode)
+
+
+def mode_allows_job(publish_mode: str, job: str) -> bool:
+    """Whether a scheduled job (digest|edu) should run for the current publish mode."""
+    if publish_mode == "both":
+        return True
+    if publish_mode == "news":
+        return job == "digest"
+    if publish_mode == "edu":
+        return job == "edu"
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +949,89 @@ def _inject_link_in_summary(summary: str, word: str, link: str) -> str:
     return f'{summary} — <a href="{link}">مطالعه خبر</a>'
 
 
+def _is_mostly_persian(text: str, max_ascii_ratio: float = 0.45) -> bool:
+    """True if alphabetic characters are mostly non-ASCII (Persian/Arabic script)."""
+    if not text or not text.strip():
+        return False
+    ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
+    total_letters = sum(1 for c in text if c.isalpha())
+    if total_letters == 0:
+        return False
+    return (ascii_letters / total_letters) <= max_ascii_ratio
+
+
+def _summarize_articles_in_persian(articles: list) -> dict:
+    """
+    Translates/summarizes a batch of English articles into short Persian digests.
+    Returns {link: {"summary": str, "category": str}} for successfully translated items.
+    """
+    if not articles:
+        return {}
+
+    compact = []
+    for a in articles:
+        compact.append({
+            "link": a.get("link", ""),
+            "title": a.get("title", ""),
+            "source": a.get("source", ""),
+            "summary": (a.get("summary") or "")[:200],
+        })
+
+    articles_json = json.dumps(compact, ensure_ascii=False, indent=2)
+
+    system_prompt = (
+        "تو مترجم و خلاصه‌نویس خبر هوش مصنوعی برای مخاطبان فارسی‌زبان هستی. "
+        "فقط JSON معتبر برگردان. خلاصه‌ها باید ۱۰۰٪ فارسی روان باشند."
+    )
+
+    user_prompt = f"""
+برای هر مقاله زیر یک خلاصه کوتاه فارسی بنویس.
+
+خروجی فقط JSON معتبر (بدون ```):
+{{
+  "items": [
+    {{
+      "link": "همان لینک ورودی",
+      "summary": "۱ تا ۲ جمله فارسی روان (۳۰ تا ۵۰ کلمه) — هیچ جمله انگلیسی مجاز نیست",
+      "category": "یکی از: model | research | tool | business | safety | education | product | data | hardware | society | other"
+    }}
+  ]
+}}
+
+قوانین:
+- برای تک‌تک مقالات ورودی دقیقاً یک آیتم برگردان
+- link را عیناً کپی کن
+- summary کاملاً فارسی باشد؛ فقط نام محصولات/شرکت‌ها (مثل GPT-4، Claude، Workday) می‌تواند انگلیسی بماند
+
+مقالات:
+{articles_json}
+"""
+
+    try:
+        raw = generate_llm_text(system_prompt, user_prompt)
+    except Exception as e:
+        print(f"[warn] Persian re-translate batch failed: {e}")
+        return {}
+
+    data = _extract_json_from_llm(raw)
+    if not isinstance(data, dict):
+        return {}
+
+    result = {}
+    for item in data.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        link = (item.get("link") or "").strip()
+        summary = (item.get("summary") or "").strip()
+        category = (item.get("category") or "other").strip().lower()
+        if not link or not summary or not _is_mostly_persian(summary):
+            continue
+        result[link] = {"summary": summary, "category": category}
+
+    print(f"[info] Persian re-translate: {len(result)}/{len(articles)} items OK")
+    return result
+
+
 def _build_digest_html(items: list, channel_footer: str = "") -> str:
     """
     Builds the final Telegram digest as HTML (parse_mode=HTML).
@@ -766,19 +1080,25 @@ def _build_digest_html(items: list, channel_footer: str = "") -> str:
 
 
 def _fallback_digest_items(articles: list, count: int = TARGET_DIGEST_COUNT) -> list:
-    """Fallback digest items when LLM JSON parsing fails."""
+    """Fallback digest items when LLM JSON parsing fails — always Persian summaries."""
+    candidates = [a for a in articles if a.get("link")][:count]
+    if not candidates:
+        return []
+
+    translated = _summarize_articles_in_persian(candidates)
     items = []
-    for article in articles[:count]:
-        title = article.get("title", "").strip()
-        source = article.get("source", "").strip()
-        summary = title
-        if source:
-            summary = f"{title} ({source})"
-        items.append({
-            "link": article.get("link", ""),
-            "summary": summary,
-            "category": "other",
-        })
+    for article in candidates:
+        link = article.get("link", "")
+        tr = translated.get(link)
+        if tr:
+            items.append({
+                "link": link,
+                "summary": tr["summary"],
+                "category": tr.get("category", "other"),
+            })
+        else:
+            # Last resort: skip English titles entirely rather than posting them
+            print(f"[warn] Skipping untranslated fallback item: {article.get('title', '')[:60]}")
     return items
 
 
@@ -786,6 +1106,7 @@ def _parse_digest_items(raw: str, articles: list) -> list:
     """
     Parses LLM JSON output into validated digest items.
     Falls back to top articles by mention_count when parsing fails.
+    Never inserts English titles into the digest — re-translates instead.
     """
     link_to_article = {a["link"]: a for a in articles if a.get("link")}
     data = _extract_json_from_llm(raw)
@@ -801,6 +1122,7 @@ def _parse_digest_items(raw: str, articles: list) -> list:
 
     valid_items = []
     seen_links = set()
+    needs_retranslate = []  # English summaries that still have a valid link
 
     for item in raw_items:
         if not isinstance(item, dict):
@@ -812,15 +1134,17 @@ def _parse_digest_items(raw: str, articles: list) -> list:
 
         if not link or link not in link_to_article or link in seen_links:
             continue
-        if not summary:
-            article = link_to_article[link]
-            summary = article.get("title", "").strip() or "خبر مهم هوش مصنوعی"
 
-        # Validate summary is mostly Persian (quick heuristic: count ASCII letters)
-        ascii_letters = sum(1 for c in summary if c.isascii() and c.isalpha())
-        total_letters = sum(1 for c in summary if c.isalpha())
-        if total_letters > 0 and ascii_letters / total_letters > 0.6:
-            print(f"[warn] Summary appears non-Persian (ASCII ratio={ascii_letters/total_letters:.2f}), skipping: {summary[:60]}")
+        if not summary or not _is_mostly_persian(summary):
+            ascii_letters = sum(1 for c in (summary or "") if c.isascii() and c.isalpha())
+            total_letters = sum(1 for c in (summary or "") if c.isalpha()) or 1
+            print(
+                f"[warn] Summary appears non-Persian "
+                f"(ASCII ratio={ascii_letters/total_letters:.2f}), will re-translate: "
+                f"{(summary or link_to_article[link].get('title', ''))[:60]}"
+            )
+            needs_retranslate.append(link_to_article[link])
+            seen_links.add(link)
             continue
 
         valid_items.append({
@@ -833,20 +1157,49 @@ def _parse_digest_items(raw: str, articles: list) -> list:
         if len(valid_items) >= TARGET_DIGEST_COUNT:
             break
 
+    # Re-translate any English LLM summaries before filling gaps
+    if needs_retranslate and len(valid_items) < TARGET_DIGEST_COUNT:
+        translated = _summarize_articles_in_persian(needs_retranslate)
+        for article in needs_retranslate:
+            if len(valid_items) >= TARGET_DIGEST_COUNT:
+                break
+            link = article.get("link", "")
+            tr = translated.get(link)
+            if not tr:
+                continue
+            valid_items.append({
+                "link": link,
+                "summary": tr["summary"],
+                "category": tr.get("category", "other"),
+            })
+
     if len(valid_items) < TARGET_DIGEST_COUNT:
-        print(f"[warn] Only {len(valid_items)} valid digest items parsed — filling from top articles")
+        print(f"[warn] Only {len(valid_items)} valid digest items — filling with Persian re-translate")
+        fill_candidates = []
         for article in articles:
             link = article.get("link", "")
             if not link or link in seen_links:
                 continue
-            valid_items.append({
-                "link": link,
-                "summary": article.get("title", "").strip() or "خبر مهم هوش مصنوعی",
-                "category": "other",
-            })
+            fill_candidates.append(article)
             seen_links.add(link)
-            if len(valid_items) >= TARGET_DIGEST_COUNT:
+            if len(fill_candidates) >= (TARGET_DIGEST_COUNT - len(valid_items)):
                 break
+
+        if fill_candidates:
+            translated = _summarize_articles_in_persian(fill_candidates)
+            for article in fill_candidates:
+                if len(valid_items) >= TARGET_DIGEST_COUNT:
+                    break
+                link = article.get("link", "")
+                tr = translated.get(link)
+                if not tr:
+                    print(f"[warn] Skipping untranslated fill item: {article.get('title', '')[:60]}")
+                    continue
+                valid_items.append({
+                    "link": link,
+                    "summary": tr["summary"],
+                    "category": tr.get("category", "other"),
+                })
 
     return valid_items[:TARGET_DIGEST_COUNT]
 
@@ -1083,6 +1436,61 @@ def generate_single_rich_post(articles):
     image_url = selected_article.get("image_url")
 
     return post_text, image_url
+
+
+def generate_educational_post(article: dict) -> str:
+    """
+    Rewrites a real educational article into a human-sounding Persian Telegram post.
+    Always includes a short code sample and a link back to the source.
+    """
+    channel_footer = TELEGRAM_CHAT_ID if TELEGRAM_CHAT_ID else ""
+    article_json = json.dumps({
+        "title": article.get("title", ""),
+        "source": article.get("source", ""),
+        "link": article.get("link", ""),
+        "summary": (article.get("summary") or "")[:600],
+    }, ensure_ascii=False, indent=2)
+
+    system_prompt = (
+        "تو نویسندهٔ یک کانال تلگرام فنی فارسی هستی — نه ربات، نه مترجم رسمی. "
+        "مثل یک برنامه‌نویس با‌تجربه حرف می‌زنی که برای دوستش توضیح می‌دهد. "
+        "لحنت محاوره‌ای، دقیق و خودمونی است. "
+        "هرگز شبیه متن تولیدشده با هوش مصنوعی ننویس."
+    )
+
+    user_prompt = f"""
+از روی این مقاله آموزشی واقعی، یک پست تلگرامی آموزشی به فارسی بنویس.
+محتوا را بازنویسی کن و با زبان خودت توضیح بده — ترجمهٔ لفظ‌به‌لفظ ممنوع.
+
+ساختار خروجی (دقیقاً HTML تلگرام، بدون ``` و بدون توضیح اضافه):
+
+<b>عنوان کوتاه و جذاب فارسی</b>
+
+پاراگراف ۱ (شروع انسانی؛ مثلاً با یک مشاهده، سوال، یا اشتباه رایج)
+
+پاراگراف ۲–۳ (اصل مطلب؛ جملات کوتاه؛ بدون فهرست شماره‌دار خشک)
+
+<pre>یک تکه کد کوتاه و واقعی پایتون (۵ تا ۱۲ خط) که همان نکته را نشان دهد</pre>
+
+منبع: <a href="{article.get('link', '')}">{article.get('source', 'منبع')}</a>
+
+یک سوال کوتاه در آخر برای دعوت به کامنت
+
+{channel_footer}
+
+قوانین سخت:
+- کل متن فارسی باشد؛ فقط نام کتابخانه/توابع/کد می‌تواند انگلیسی باشد
+- ممنوع: «در این مطلب به بررسی می‌پردازیم»، «نکته مهم این است که»، «در نتیجه می‌توان گفت»، «بیایید بررسی کنیم»، لحن مقاله‌ای
+- ممنوع: ایموجی زیاد (حداکثر یکی در کل پست، آن هم اختیاری)
+- کد داخل <pre> باشد نه markdown
+- لینک منبع را عوض نکن
+- طول کل پست حدود ۲۰۰ تا ۳۵۰ کلمه
+
+اطلاعات مقاله منبع:
+{article_json}
+"""
+
+    return generate_llm_text(system_prompt, user_prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -1449,19 +1857,27 @@ def safe_truncate_html(text, max_chars):
 def clean_html_for_telegram(text, post_type="digest"):
     """
     Cleans up LLM/generated text, strips preambles, balances HTML tags.
-    post_type: 'digest' or 'single'
-    Both modes output HTML for Telegram parse_mode=HTML.
+    post_type: 'digest' | 'single' | 'edu'
     """
     if not text:
         return text
 
-    # Strip markdown code fences
+    # Convert markdown fenced code blocks to Telegram <pre> before stripping fences
+    def _fence_to_pre(match):
+        code = match.group(2) or ""
+        code = code.strip("\n")
+        # Escape HTML special chars inside code
+        code = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f"<pre>{code}</pre>"
+
+    text = re.sub(r"```([a-zA-Z0-9_+-]*)\n(.*?)```", _fence_to_pre, text, flags=re.DOTALL)
+
+    # Strip leftover markdown/html fences
     text = re.sub(r"^```html\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE).strip()
 
     if post_type == "digest":
-        # Strip anything before the bold header
         title_match = re.search(r"(<b>\s*مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
         if title_match:
             text = title_match.group(1)
@@ -1469,8 +1885,7 @@ def clean_html_for_telegram(text, post_type="digest"):
             title_match = re.search(r"(مهم‌?ترین.*)", text, flags=re.DOTALL | re.IGNORECASE)
             if title_match:
                 text = title_match.group(1)
-    else:
-        # single: strip English/plain preamble before first emoji or <b>
+    elif post_type in ("single", "edu"):
         content_match = re.search(
             r"([🔥🚀🧠📋🛠🔐💸🎬⚡🌐🤖💡🔬📡🏆]|<b>)",
             text
@@ -1481,21 +1896,28 @@ def clean_html_for_telegram(text, post_type="digest"):
     # Convert markdown links [title](url) → <a href="url">title</a>
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r'<a href="\2">\1</a>', text)
 
-    # Replace unsupported block tags with newlines
+    # Replace unsupported block tags with newlines (keep pre/code/a/b/i)
     text = re.sub(r"</?(?:p|div|span|ul|ol|li|br|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     balanced_lines = []
+    inside_pre = False
     for line in text.split("\n"):
+        if "<pre>" in line.lower():
+            inside_pre = True
+        if inside_pre:
+            balanced_lines.append(line.rstrip())
+            if "</pre>" in line.lower():
+                inside_pre = False
+            continue
+
         line = line.strip()
         if not line:
             balanced_lines.append("")
             continue
 
-        # Remove incomplete <a> tags at end of line
         line = re.sub(r'<a\s+href="[^"]*$', "", line, flags=re.IGNORECASE)
 
-        # Balance <a> tags
         open_a = len(re.findall(r"<a\b[^>]*>", line))
         close_a = line.count("</a>")
         if open_a > close_a:
@@ -1503,7 +1925,6 @@ def clean_html_for_telegram(text, post_type="digest"):
         elif close_a > open_a:
             line = re.sub(r"</a>", "", line, count=close_a - open_a)
 
-        # Balance <b> tags
         open_b = line.count("<b>")
         close_b = line.count("</b>")
         if open_b > close_b:
@@ -1511,7 +1932,6 @@ def clean_html_for_telegram(text, post_type="digest"):
         elif close_b > open_b:
             line = re.sub(r"</b>", "", line, count=close_b - open_b)
 
-        # Balance <i> tags
         open_i = line.count("<i>")
         close_i = line.count("</i>")
         if open_i > close_i:
@@ -1522,6 +1942,9 @@ def clean_html_for_telegram(text, post_type="digest"):
         balanced_lines.append(line)
 
     result = "\n".join(balanced_lines)
+    if result.lower().count("<pre>") > result.lower().count("</pre>"):
+        result += "</pre>" * (result.lower().count("<pre>") - result.lower().count("</pre>"))
+
     result = re.sub(r"\n{3,}", "\n\n", result).strip()
     return result
 
@@ -1622,17 +2045,55 @@ def send_telegram_post(chat_id, html_text, image_url=None, post_type="digest"):
 # Step 6: On-Demand Telegram Command Handler
 # ---------------------------------------------------------------------------
 
+def _parse_mode_command(text: str):
+    """
+    Parses admin publish-mode commands.
+    Returns ('status', None) | ('set', 'both'|'news'|'edu') | None
+    """
+    t = (text or "").strip().lower()
+    t = t.replace("ي", "ی").replace("ك", "ک")
+
+    aliases = {
+        "both": "both", "full": "both", "all": "both",
+        "خبر و آموزش": "both", "حالت کامل": "both", "کامل": "both",
+        "news": "news", "فقط خبر": "news", "فقط اخبار": "news", "خبر": "news",
+        "edu": "edu", "education": "edu", "فقط آموزش": "edu", "آموزش": "edu",
+    }
+
+    if t in ("/mode", "/mode status", "وضعیت", "حالت"):
+        return ("status", None)
+
+    if t.startswith("/mode"):
+        parts = t.split(maxsplit=1)
+        if len(parts) == 1:
+            return ("status", None)
+        arg = parts[1].strip()
+        if arg in ("status", "وضعیت"):
+            return ("status", None)
+        mapped = aliases.get(arg)
+        if mapped:
+            return ("set", mapped)
+        return ("status", None)
+
+    if t in aliases and t in ("فقط خبر", "فقط اخبار", "خبر و آموزش", "حالت کامل", "فقط آموزش", "کامل"):
+        # Bare Persian phrases only when clearly mode-related (not bare «آموزش» — that triggers edu post)
+        if t in ("فقط خبر", "فقط اخبار", "خبر و آموزش", "حالت کامل", "فقط آموزش", "کامل"):
+            return ("set", aliases[t])
+
+    return None
+
+
 def check_and_handle_on_demand_requests():
     """
-    Checks for Telegram commands from the authorized user (/news, /digest, /single).
-    Uses offset to avoid reprocessing already-seen updates.
-    Returns list of (chat_id, mode) tuples to handle, or empty list.
+    Processes Telegram commands from the authorized admin.
+    - /mode … : updates publish mode immediately and acknowledges
+    - /digest /edu /single : queued as on-demand content jobs
+    Returns list of (chat_id, job) where job is digest|edu|single.
     """
     if not TELEGRAM_BOT_TOKEN:
         return []
 
     try:
-        # First call: fetch all pending updates to find the latest offset
         resp = requests.get(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
             timeout=15,
@@ -1640,14 +2101,19 @@ def check_and_handle_on_demand_requests():
         if not resp.ok:
             return []
 
-        data = resp.json()
-        updates = data.get("result", [])
-
+        updates = resp.json().get("result", [])
         if not updates:
             return []
 
         on_demand_chats = []
         max_update_id = 0
+
+        content_commands = {
+            "/news": "digest", "/digest": "digest", "/latest": "digest",
+            "/start": "digest", "اخبار": "digest", "خبر": "digest",
+            "/single": "single", "پست": "single",
+            "/edu": "edu", "/lesson": "edu", "آموزش": "edu",
+        }
 
         for update in updates:
             update_id = update.get("update_id", 0)
@@ -1658,24 +2124,66 @@ def check_and_handle_on_demand_requests():
             sender = msg.get("from", {})
             username = (sender.get("username") or "").strip().lstrip("@")
             chat_id = msg.get("chat", {}).get("id")
-            text = (msg.get("text") or "").strip().lower()
+            raw_text = (msg.get("text") or "").strip()
+            text = raw_text.lower()
 
-            if text in ["/news", "/digest", "/single", "/latest", "/start", "اخبار", "خبر", "پست"]:
-                if username.lower() == ALLOWED_TELEGRAM_USER.lower():
-                    mode = "single" if text in ["/single", "پست"] else "digest"
-                    print(f"[info] Authorized command '{text}' received from @{username} (mode: {mode})")
-                    on_demand_chats.append((chat_id, mode))
-                else:
-                    deny_text = (
-                        f"⛔️ <b>دسترسی غیرمجاز</b>\n"
-                        f"این ربات فقط توسط کاربر @{ALLOWED_TELEGRAM_USER} قابل فراخوانی است."
-                    )
+            if not chat_id or not text:
+                continue
+
+            is_admin = username.lower() == ALLOWED_TELEGRAM_USER.lower()
+
+            mode_cmd = _parse_mode_command(raw_text)
+            if mode_cmd:
+                if not is_admin:
                     try:
-                        send_telegram_post(chat_id, deny_text)
+                        send_telegram_post(
+                            chat_id,
+                            f"⛔️ دسترسی غیرمجاز — فقط @{ALLOWED_TELEGRAM_USER}",
+                        )
                     except Exception:
                         pass
+                    continue
 
-        # Acknowledge all processed updates so they won't appear again
+                action, value = mode_cmd
+                if action == "set" and value:
+                    save_publish_mode(value)
+                    reply = (
+                        f"✅ حالت انتشار روی <b>{publish_mode_label(value)}</b> تنظیم شد.\n"
+                        f"<code>/mode news</code> — فقط خبر\n"
+                        f"<code>/mode both</code> — خبر + آموزش\n"
+                        f"<code>/mode edu</code> — فقط آموزش"
+                    )
+                else:
+                    current = load_publish_mode()
+                    reply = (
+                        f"⚙️ حالت فعلی: <b>{publish_mode_label(current)}</b> (<code>{current}</code>)\n\n"
+                        f"<code>/mode news</code> — فقط خبر\n"
+                        f"<code>/mode both</code> — خبر + آموزش\n"
+                        f"<code>/mode edu</code> — فقط آموزش"
+                    )
+                try:
+                    send_telegram_post(chat_id, reply)
+                except Exception as e:
+                    print(f"[warn] Could not reply to /mode: {e}")
+                continue
+
+            job = content_commands.get(text)
+            if not job:
+                continue
+
+            if not is_admin:
+                try:
+                    send_telegram_post(
+                        chat_id,
+                        f"⛔️ <b>دسترسی غیرمجاز</b>\nاین ربات فقط توسط کاربر @{ALLOWED_TELEGRAM_USER} قابل فراخوانی است.",
+                    )
+                except Exception:
+                    pass
+                continue
+
+            print(f"[info] Authorized command '{text}' from @{username} (job: {job})")
+            on_demand_chats.append((chat_id, job))
+
         if max_update_id > 0:
             requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
@@ -1695,112 +2203,105 @@ def check_and_handle_on_demand_requests():
 # Main Routine
 # ---------------------------------------------------------------------------
 
-def _send_infographic_photo(chat_id: str, image_path: str, digest_text: str = "") -> None:
-    """
-    Uploads the infographic PNG to Telegram, then sends the digest text as a
-    separate follow-up message.  Always two posts: photo first, text second.
-    """
-    if not TELEGRAM_BOT_TOKEN:
+def _run_digest(targets, on_demand_requests):
+    print("[info] Generating Daily Digest...")
+    articles = fetch_recent_articles(lookback_hours=LOOKBACK_HOURS)
+    if not articles:
+        print(f"[warn] No articles found in the last {LOOKBACK_HOURS} hours.")
+        return
+    articles = deduplicate_and_score(articles)
+    digest_text, _digest_items = generate_daily_digest(articles)
+    if not digest_text:
+        print("[warn] Empty digest — nothing to send")
         return
 
-    # Build a minimal caption for the photo (date + channel tag only — no news text)
-    date_str      = _jalali_today()
-    channel       = TELEGRAM_CHAT_ID or ""
-    short_caption = f"مهم‌ترین اخبار هوش مصنوعی در ۲۴ ساعت گذشته\n{date_str}\n{channel}".strip()
+    all_targets = list(targets) + [cid for cid, rm in on_demand_requests if rm == "digest"]
+    for chat in all_targets:
+        send_telegram_post(chat, digest_text, post_type="digest")
 
-    # ── Post 1: infographic photo with short caption ──────────────────────
-    bot_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    try:
-        with open(image_path, "rb") as img_file:
-            for attempt in range(1, 4):
-                img_file.seek(0)
-                data = {"chat_id": chat_id, "caption": short_caption}
-                resp = requests.post(
-                    bot_url,
-                    data=data,
-                    files={"photo": ("infographic.png", img_file, "image/png")},
-                    timeout=60,
-                )
-                if resp.ok:
-                    print(f"[info] Infographic photo sent to {chat_id}")
-                    break
-                if resp.status_code == 429:
-                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
-                    print(f"[warn] Rate limited sending infographic, waiting {retry_after}s...")
-                    time.sleep(retry_after)
-                    continue
-                print(f"[warn] sendPhoto (file) failed ({resp.status_code}): {resp.text[:200]}")
-                return
-    except Exception as e:
-        print(f"[warn] Could not send infographic photo: {e}")
+
+def _run_edu(targets, on_demand_requests, slot: int = 0):
+    print(f"[info] Generating educational post (slot={slot})...")
+    articles = fetch_edu_articles(lookback_hours=LOOKBACK_HOURS_EDU)
+    if not articles:
+        print("[warn] No educational articles found — retrying with 14-day lookback")
+        articles = fetch_edu_articles(lookback_hours=24 * 14)
+    if not articles:
+        print("[warn] Still no educational articles — skipping edu post")
         return
 
-    # ── Post 2: full digest text as a separate message ────────────────────
-    if digest_text:
-        time.sleep(1)
-        send_telegram_post(chat_id, digest_text, post_type="digest")
+    selected = select_edu_article(articles, slot=slot)
+    if not selected:
+        print("[warn] Could not select educational article")
+        return
+
+    post_text = generate_educational_post(selected)
+    if not post_text:
+        print("[warn] Empty educational post")
+        return
+
+    all_targets = list(targets) + [cid for cid, rm in on_demand_requests if rm == "edu"]
+    for chat in all_targets:
+        send_telegram_post(chat, post_text, post_type="edu")
+
+
+def _run_single(targets, on_demand_requests):
+    print("[info] Generating Single Rich News Post...")
+    articles = fetch_recent_articles(lookback_hours=LOOKBACK_HOURS_SINGLE)
+    if not articles:
+        print(f"[warn] No articles found in the last {LOOKBACK_HOURS_SINGLE} hours.")
+        return
+    articles = deduplicate_and_score(articles)
+    post_text, image_url = generate_single_rich_post(articles)
+    if not post_text:
+        return
+    all_targets = list(targets) + [cid for cid, rm in on_demand_requests if rm == "single"]
+    for chat in all_targets:
+        send_telegram_post(chat, post_text, image_url, post_type="single")
+
 
 def main():
     mode = sys.argv[1].lower() if len(sys.argv) > 1 else "digest"
-    print(f"=== Hooshkav AI News Bot (Execution Mode: {mode}) ===")
+    slot = 0
+    if len(sys.argv) > 2 and sys.argv[2].isdigit():
+        slot = int(sys.argv[2])
+
+    print(f"=== Hooshkav Bot (mode={mode}, slot={slot}) ===")
 
     on_demand_requests = check_and_handle_on_demand_requests()
-
-    # digest uses 24h window; single uses 8h to avoid repeating morning digest stories
-    lookback = LOOKBACK_HOURS if mode == "digest" else LOOKBACK_HOURS_SINGLE
-    articles = fetch_recent_articles(lookback_hours=lookback)
-
-    if not articles:
-        print(f"[warn] No articles found in the last {lookback} hours.")
-        return
-
-    # Semantic dedup + mention_count scoring
-    articles = deduplicate_and_score(articles)
+    publish_mode = load_publish_mode()
+    print(f"[info] Publish mode: {publish_mode} ({publish_mode_label(publish_mode)})")
 
     targets = set()
     if TELEGRAM_CHAT_ID:
         targets.add(TELEGRAM_CHAT_ID)
 
-    if mode == "digest":
-        print("[info] Generating Daily Digest...")
+    # On-demand jobs always run for the requesting admin chat, even if publish mode would skip the channel
+    wants_digest = mode == "digest" or any(rm == "digest" for _, rm in on_demand_requests)
+    wants_edu = mode == "edu" or any(rm == "edu" for _, rm in on_demand_requests)
+    wants_single = mode == "single" or any(rm == "single" for _, rm in on_demand_requests)
 
-        digest_text, digest_items = generate_daily_digest(articles)
+    if wants_digest:
+        channel_ok = mode_allows_job(publish_mode, "digest")
+        digest_targets = set(targets) if (mode == "digest" and channel_ok) else set()
+        # If scheduled digest blocked by publish mode, still serve on-demand digests
+        if not channel_ok and mode == "digest":
+            print(f"[info] Skipping scheduled digest — publish mode is '{publish_mode}'")
+        if digest_targets or any(rm == "digest" for _, rm in on_demand_requests):
+            _run_digest(digest_targets, on_demand_requests)
+        elif mode == "digest":
+            pass
 
-        # ── 1. Generate infographic ──────────────────────────────────────────
-        infographic_path = None
-        if digest_items:
-            print("[info] Generating infographic image...")
-            infographic_path = generate_infographic(digest_items)
-            if not infographic_path:
-                print("[warn] Infographic generation failed — will send text only")
+    if wants_edu:
+        channel_ok = mode_allows_job(publish_mode, "edu")
+        edu_targets = set(targets) if (mode == "edu" and channel_ok) else set()
+        if not channel_ok and mode == "edu":
+            print(f"[info] Skipping scheduled edu — publish mode is '{publish_mode}'")
+        if edu_targets or any(rm == "edu" for _, rm in on_demand_requests):
+            _run_edu(edu_targets, on_demand_requests, slot=slot)
 
-        # ── 2. Send: photo+caption if infographic exists, else text only ─────
-        all_targets = list(targets) + [cid for cid, rm in on_demand_requests if rm == "digest"]
-
-        for chat in all_targets:
-            if infographic_path and os.path.exists(infographic_path):
-                _send_infographic_photo(chat, infographic_path, digest_text)
-            elif digest_text:
-                send_telegram_post(chat, digest_text, post_type="digest")
-
-        # ── 3. Clean up infographic temp file ────────────────────────────────
-        if infographic_path and os.path.exists(infographic_path):
-            try:
-                os.remove(infographic_path)
-            except Exception:
-                pass
-
-    else:
-        # single mode: one rich post (for manual/on-demand use)
-        print("[info] Generating Single Rich News Post...")
-        post_text, image_url = generate_single_rich_post(articles)
-        if post_text:
-            for chat in targets:
-                send_telegram_post(chat, post_text, image_url, post_type="single")
-
-        for chat_id, req_mode in on_demand_requests:
-            if post_text:
-                send_telegram_post(chat_id, post_text, image_url, post_type="single")
+    if wants_single:
+        _run_single(targets if mode == "single" else set(), on_demand_requests)
 
     print("=== Job Completed Successfully ===")
 
