@@ -23,6 +23,12 @@
       "title": "LLM Observability: Tracing Every Step From Prompt to Final Answer",
       "source": "Medium: Machine Learning",
       "posted_at": "2026-10-15T18:33:47.664536+00:00"
+    },
+    {
+      "link": "https://towardsdatascience.com/i-reran-my-python-314-jit-benchmarks-on-python-315/",
+      "title": "I Reran My Python 3.14 JIT Benchmarks on Python 3.15",
+      "source": "Towards Data Science",
+      "posted_at": "2026-10-16T13:29:08.340394+00:00"
     }
   ]
 }
