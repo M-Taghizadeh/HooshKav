@@ -1,11 +1,11 @@
 {
-  "date": "2026-10-16",
+  "date": "2026-10-17",
   "links": [
-    "https://medium.com/@agentsearchhq/how-to-add-web-search-to-a-langchain-agent-in-python-no-api-key-4e12b8c0266d?source=rss------langchain-5",
-    "https://towardsdatascience.com/i-reran-my-python-314-jit-benchmarks-on-python-315/"
+    "https://medium.com/@naveenpandey2706/how-to-build-production-ai-agents-in-python-with-agentspan-and-groq-part-4-a-scheduled-6a8472278b4b?source=rss------python-5",
+    "https://www.kdnuggets.com/agentic-rag-vs-naive-rag-when-your-retrieval-system-should-think-for-itself"
   ],
   "titles": [
-    "How to Add Web Search to a LangChain Agent in Python (No API Key)",
-    "I Reran My Python 3.14 JIT Benchmarks on Python 3.15"
+    "How to Build Production AI Agents in Python with Agentspan and Groq — Part 4: A Scheduled…",
+    "Agentic RAG vs. Naive RAG: When Your Retrieval System Should Think for Itself"
   ]
 }
